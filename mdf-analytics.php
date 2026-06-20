@@ -72,6 +72,16 @@ define( 'MDF_INTERNAL_AGENTS', serialize( [
 ] ) );
 
 // ---------------------------------------------------------------------------
+// Vendored dependencies
+// ---------------------------------------------------------------------------
+
+// Namespace-scoped league/html-to-markdown — avoids class-redeclaration
+// collisions if another plugin also vendors the same upstream library.
+if ( ! class_exists( 'MdfAnalytics\Vendor\League\HTMLToMarkdown\HtmlConverter' ) ) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
+// ---------------------------------------------------------------------------
 // Activation / deactivation
 // ---------------------------------------------------------------------------
 

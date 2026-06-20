@@ -1,0 +1,16 @@
+{
+    "name": "bitcryptic/mdf-analytics-wp",
+    "description": "WordPress plugin — tracks AI agent traffic and Accept: text/markdown requests",
+    "type": "wordpress-plugin",
+    "license": "MIT",
+    "require": {
+        "php": "^7.4 || ^8.0",
+        "league/html-to-markdown": "^5.1"
+    },
+    "require-dev": {
+        "humbug/php-scoper": "^0.18"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

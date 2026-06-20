@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Vendored `league/html-to-markdown` (v5.1.1) with namespace scoping (`MdfAnalytics\Vendor\League\HTMLToMarkdown`) to eliminate class-redeclaration collisions if another plugin also vendors the same upstream library. No Composer required at runtime — the library is source-committed. Scoped via `humbug/php-scoper`, built by `build-vendor.sh`.
+
 ---
 
 ## [0.1.3] - 2026-06-10
