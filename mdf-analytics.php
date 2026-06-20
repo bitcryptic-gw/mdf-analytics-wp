@@ -82,6 +82,488 @@ if ( ! class_exists( 'MdfAnalytics\Vendor\League\HTMLToMarkdown\HtmlConverter' )
 }
 
 // ---------------------------------------------------------------------------
+// Markdown pre-build cache pipeline
+// ---------------------------------------------------------------------------
+
+define( 'MDF_CACHE_BATCH_SIZE', 20 ); // posts per backfill cron tick
+
+/**
+ * Return the base cache directory path (wp-content/uploads/mdf-cache/).
+ */
+function mdf_cache_base_dir(): string {
+    $upload = wp_upload_dir();
+    return $upload['basedir'] . '/mdf-cache';
+}
+
+/**
+ * Return the posts subdirectory path.
+ */
+function mdf_cache_posts_dir(): string {
+    return mdf_cache_base_dir() . '/posts';
+}
+
+/**
+ * Create the cache directory structure with an empty index.html to block
+ * directory listing.
+ */
+function mdf_create_cache_dirs(): void {
+    $base  = mdf_cache_base_dir();
+    $posts = mdf_cache_posts_dir();
+
+    if ( ! is_dir( $posts ) ) {
+        wp_mkdir_p( $posts );
+    }
+
+    $index = $base . '/index.html';
+    if ( ! file_exists( $index ) ) {
+        file_put_contents( $index, '' );
+    }
+}
+
+/**
+ * Compute a SHA-256 hash of content (post-filter, shortcodes expanded).
+ */
+function mdf_content_hash( string $content ): string {
+    return 'sha256:' . hash( 'sha256', $content );
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar (.meta.json) read / write
+// ---------------------------------------------------------------------------
+
+function mdf_sidecar_path( int $post_id ): string {
+    return mdf_cache_posts_dir() . '/' . $post_id . '.meta.json';
+}
+
+function mdf_sidecar_read( int $post_id ): ?array {
+    $path = mdf_sidecar_path( $post_id );
+    if ( ! file_exists( $path ) ) {
+        return null;
+    }
+    $json = file_get_contents( $path );
+    if ( $json === false ) {
+        return null;
+    }
+    $data = json_decode( $json, true );
+    return is_array( $data ) ? $data : null;
+}
+
+function mdf_sidecar_write( int $post_id, array $data ): bool {
+    $path = mdf_sidecar_path( $post_id );
+    $dir  = mdf_cache_posts_dir();
+
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+    }
+
+    $tmp = $path . '.' . getmypid() . '.tmp';
+    $json = wp_json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
+    if ( $json === false || file_put_contents( $tmp, $json . "\n" ) === false ) {
+        return false;
+    }
+
+    // Atomic rename — old file stays servable until the new one is in place.
+    return rename( $tmp, $path );
+}
+
+// ---------------------------------------------------------------------------
+// Manifest (manifest.json) read / write
+// ---------------------------------------------------------------------------
+
+function mdf_manifest_path(): string {
+    return mdf_cache_base_dir() . '/manifest.json';
+}
+
+function mdf_manifest_read(): array {
+    $path = mdf_manifest_path();
+    if ( ! file_exists( $path ) ) {
+        return [
+            'version'       => 1,
+            'last_full_run' => null,
+            'post_count'    => 0,
+            'failed_ids'    => [],
+        ];
+    }
+    $json = file_get_contents( $path );
+    if ( $json === false ) {
+        return [
+            'version'       => 1,
+            'last_full_run' => null,
+            'post_count'    => 0,
+            'failed_ids'    => [],
+        ];
+    }
+    $data = json_decode( $json, true );
+    return is_array( $data ) ? $data : [
+        'version'       => 1,
+        'last_full_run' => null,
+        'post_count'    => 0,
+        'failed_ids'    => [],
+    ];
+}
+
+function mdf_manifest_write( array $manifest ): bool {
+    $path = mdf_manifest_path();
+    $dir  = mdf_cache_base_dir();
+
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+    }
+
+    $tmp  = $path . '.' . getmypid() . '.tmp';
+    $json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
+    if ( $json === false || file_put_contents( $tmp, $json . "\n" ) === false ) {
+        return false;
+    }
+    return rename( $tmp, $path );
+}
+
+/**
+ * Update manifest after a single-post conversion result.
+ */
+function mdf_manifest_record_result( int $post_id, bool $success ): void {
+    $manifest = mdf_manifest_read();
+
+    if ( $success ) {
+        $manifest['failed_ids'] = array_values( array_diff( $manifest['failed_ids'], [ $post_id ] ) );
+        $manifest['post_count'] = max( $manifest['post_count'], count( mdf_list_cached_post_ids() ) );
+    } else {
+        if ( ! in_array( $post_id, $manifest['failed_ids'], true ) ) {
+            $manifest['failed_ids'][] = $post_id;
+        }
+    }
+
+    $manifest['last_full_run'] = gmdate( 'c' );
+    mdf_manifest_write( $manifest );
+}
+
+/**
+ * Count .md files in the posts/ directory.  Fast — just a directory scan,
+ * no JSON parsing per file.
+ */
+function mdf_list_cached_post_ids(): array {
+    $posts_dir = mdf_cache_posts_dir();
+    if ( ! is_dir( $posts_dir ) ) {
+        return [];
+    }
+    $ids = [];
+    foreach ( scandir( $posts_dir ) as $entry ) {
+        if ( substr( $entry, -3 ) === '.md' ) {
+            $ids[] = (int) basename( $entry, '.md' );
+        }
+    }
+    return $ids;
+}
+
+// ---------------------------------------------------------------------------
+// Conversion
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a single post to markdown and write the cached files.
+ *
+ * - Computes the_content() (post-filter) and its SHA-256 hash.
+ * - Compares against the existing sidecar source_hash.
+ * - No-op if unchanged.
+ * - Writes to temp first, then atomic rename — old .md stays servable
+ *   throughout the rebuild.
+ * - Updates manifest.json on completion.
+ *
+ * @return bool True if a (re)build occurred, false if no-op.
+ */
+function mdf_convert_post( int $post_id ): bool {
+    $post = get_post( $post_id );
+    if ( ! $post || $post->post_status !== 'publish' ) {
+        mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+
+    // Apply the_content() filters so shortcodes / blocks are resolved to HTML.
+    $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+
+    $hash = mdf_content_hash( $html );
+
+    // Compare against existing sidecar — no-op if unchanged.
+    $existing = mdf_sidecar_read( $post_id );
+    if ( $existing !== null && ( $existing['source_hash'] ?? '' ) === $hash ) {
+        return false; // unchanged, nothing to do
+    }
+
+    try {
+        $converter = new MdfAnalytics\Vendor\League\HTMLToMarkdown\HtmlConverter( [
+            'strip_tags' => true,
+        ] );
+        $markdown = $converter->convert( $html );
+    } catch ( \Throwable $e ) {
+        mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+
+    // Write .md to temp first, then atomic rename.
+    $md_path = mdf_cache_posts_dir() . '/' . $post_id . '.md';
+    $md_dir  = mdf_cache_posts_dir();
+    if ( ! is_dir( $md_dir ) ) {
+        wp_mkdir_p( $md_dir );
+    }
+    $md_tmp = $md_path . '.' . getmypid() . '.tmp';
+    if ( file_put_contents( $md_tmp, $markdown ) === false ) {
+        mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+    if ( ! rename( $md_tmp, $md_path ) ) {
+        mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+
+    // Write sidecar.
+    $sidecar = [
+        'post_id'           => $post_id,
+        'post_modified_gmt' => $post->post_modified_gmt,
+        'built_at'          => gmdate( 'c' ),
+        'source_hash'       => $hash,
+        'converter_version' => 'league/html-to-markdown@5.1.1',
+    ];
+    mdf_sidecar_write( $post_id, $sidecar );
+
+    mdf_manifest_record_result( $post_id, true );
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// WP-Cron handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Single-post rebuild callback for WP-Cron.
+ * Hook: mdf_markdown_rebuild
+ */
+function mdf_cron_rebuild_post( int $post_id ): void {
+    mdf_convert_post( $post_id );
+}
+add_action( 'mdf_markdown_rebuild', 'mdf_cron_rebuild_post' );
+
+/**
+ * Process one batch of the backfill queue.
+ * Re-schedules itself if there are more posts to process.
+ * Hook: mdf_backfill_batch
+ */
+function mdf_cron_backfill_batch(): void {
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return;
+    }
+
+    $queue     = get_option( 'mdf_backfill_queue', [] );
+    $batch     = array_splice( $queue, 0, MDF_CACHE_BATCH_SIZE );
+    $processed = 0;
+
+    foreach ( $batch as $post_id ) {
+        mdf_convert_post( (int) $post_id );
+        $processed++;
+    }
+
+    update_option( 'mdf_backfill_queue', $queue );
+
+    if ( count( $queue ) > 0 ) {
+        // Still more to go — re-schedule.
+        if ( ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+            wp_schedule_single_event( time() + 10, 'mdf_backfill_batch' );
+        }
+    } else {
+        // Backfill complete — update total count and clean up.
+        $manifest = mdf_manifest_read();
+        $manifest['last_full_run'] = gmdate( 'c' );
+        $manifest['post_count']    = count( mdf_list_cached_post_ids() );
+        mdf_manifest_write( $manifest );
+        update_option( 'mdf_backfill_total', null );
+    }
+
+    if ( $processed > 0 ) {
+        update_option( 'mdf_backfill_processed', (int) get_option( 'mdf_backfill_processed', 0 ) + $processed );
+    }
+}
+add_action( 'mdf_backfill_batch', 'mdf_cron_backfill_batch' );
+
+// ---------------------------------------------------------------------------
+// save_post — enqueue rebuild when content changes
+// ---------------------------------------------------------------------------
+
+/**
+ * On post save, compute the new content hash and compare against the
+ * existing sidecar.  If changed (or no sidecar exists), enqueue a
+ * rebuild via WP-Cron — never convert synchronously inside the save_post
+ * request handler.
+ */
+function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
+    // Skip autosaves, revisions, and non-published posts.
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+    if ( wp_is_post_revision( $post_id ) ) return;
+    if ( $post->post_status !== 'publish' ) return;
+
+    // Only act if markdown offering is enabled.
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) return;
+
+    // Compute hash of new content.
+    $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+    $hash = mdf_content_hash( $html );
+
+    // Compare against existing sidecar.
+    $existing = mdf_sidecar_read( $post_id );
+    if ( $existing !== null && ( $existing['source_hash'] ?? '' ) === $hash ) {
+        return; // unchanged
+    }
+
+    // Schedule a rebuild for this post.
+    mdf_schedule_post_rebuild( $post_id );
+}
+add_action( 'save_post', 'mdf_on_save_post', 20, 3 );
+
+/**
+ * Schedule a single-post markdown rebuild via WP-Cron.
+ */
+function mdf_schedule_post_rebuild( int $post_id ): void {
+    $args = [ $post_id ];
+    if ( ! wp_next_scheduled( 'mdf_markdown_rebuild', $args ) ) {
+        wp_schedule_single_event( time() + 5, 'mdf_markdown_rebuild', $args );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Negotiation gating — serve cached markdown on Accept: text/markdown
+// ---------------------------------------------------------------------------
+
+/**
+ * On template_redirect, if the client requests text/markdown and a cached
+ * .md file exists for the current post, serve it.  Otherwise do nothing
+ * (let WordPress render the normal HTML response).
+ *
+ * Key design rule: NEVER offer markdown for a URL until a pre-built .md
+ * file actually exists for it.  No live-conversion fallback.
+ */
+function mdf_maybe_serve_markdown(): void {
+    // Must be a singular post/page/CPT (get_queried_object_id returns 0 otherwise).
+    $post_id = get_queried_object_id();
+    if ( $post_id <= 0 ) return;
+
+    // Only if the site admin has enabled markdown offering.
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) return;
+
+    // Check Accept header for text/markdown.
+    $accept = isset( $_SERVER['HTTP_ACCEPT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_ACCEPT'] ) ) : '';
+    if ( stripos( $accept, 'text/markdown' ) === false ) return;
+
+    // Fast filesystem stat — do NOT read or parse the .meta.json sidecar.
+    $md_path = mdf_cache_posts_dir() . '/' . $post_id . '.md';
+    if ( ! file_exists( $md_path ) ) return;
+
+    $mtime = filemtime( $md_path );
+    if ( $mtime === false ) return;
+
+    $size = filesize( $md_path );
+    if ( $size === false ) return;
+
+    // Conditional GET support.
+    $if_mod = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
+    if ( $if_mod !== '' ) {
+        $if_mod_time = strtotime( $if_mod );
+        if ( $if_mod_time !== false && $if_mod_time >= $mtime ) {
+            status_header( 304 );
+            header( 'Vary: Accept' );
+            header( 'Cache-Control: public, max-age=3600' );
+            exit;
+        }
+    }
+
+    status_header( 200 );
+    header( 'Content-Type: text/markdown; charset=utf-8' );
+    header( 'Content-Length: ' . $size );
+    header( 'Last-Modified: ' . gmdate( 'D, d M Y H:i:s', $mtime ) . ' GMT' );
+    header( 'Vary: Accept' );
+    header( 'Cache-Control: public, max-age=3600' );
+
+    if ( isset( $_SERVER['REQUEST_METHOD'] ) && strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) === 'HEAD' ) {
+        exit;
+    }
+
+    readfile( $md_path );
+    exit;
+}
+add_action( 'template_redirect', 'mdf_maybe_serve_markdown', 5 );
+
+// ---------------------------------------------------------------------------
+// Backfill — full catalogue rebuild on toggle enable
+// ---------------------------------------------------------------------------
+
+/**
+ * Kick off a full backfill: enqueue every published post ID into a batched
+ * WP-Cron queue.
+ */
+function mdf_start_backfill(): void {
+    $post_types = get_post_types( [ 'public' => true ] );
+    $post_ids   = get_posts( [
+        'post_type'        => $post_types,
+        'post_status'      => 'publish',
+        'posts_per_page'   => -1,
+        'fields'           => 'ids',
+        'no_found_rows'    => true,
+        'suppress_filters' => true,
+    ] );
+
+    $total = count( $post_ids );
+    if ( $total === 0 ) return;
+
+    update_option( 'mdf_backfill_queue', $post_ids );
+    update_option( 'mdf_backfill_total', $total );
+    update_option( 'mdf_backfill_processed', 0 );
+
+    // Schedule the first batch.
+    if ( ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+        wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
+    }
+}
+
+/**
+ * Check whether a backfill is currently in progress.
+ */
+function mdf_backfill_in_progress(): bool {
+    $queue = get_option( 'mdf_backfill_queue', [] );
+    return count( $queue ) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Admin notice during backfill
+// ---------------------------------------------------------------------------
+
+function mdf_maybe_show_backfill_notice(): void {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+
+    // Dismissal via query param.
+    if ( isset( $_GET['mdf_dismiss_backfill'] ) && check_admin_referer( 'mdf_dismiss_backfill' ) ) {
+        update_option( 'mdf_backfill_notice_dismissed', true );
+        return;
+    }
+
+    if ( get_option( 'mdf_backfill_notice_dismissed', false ) ) return;
+    if ( ! mdf_backfill_in_progress() ) return;
+
+    $total     = (int) get_option( 'mdf_backfill_total', 0 );
+    $processed = (int) get_option( 'mdf_backfill_processed', 0 );
+    $remaining = $total - $processed;
+
+    $dismiss_url = add_query_arg( [
+        'mdf_dismiss_backfill' => 1,
+        '_wpnonce'             => wp_create_nonce( 'mdf_dismiss_backfill' ),
+    ], admin_url( 'admin.php?page=mdf-analytics' ) );
+
+    echo '<div class="notice notice-info is-dismissible" data-dismiss-url="' . esc_url( $dismiss_url ) . '">';
+    echo '<p><strong>MDF Analytics:</strong> Building markdown versions of ' . (int) $total . ' posts — agents will be offered markdown as each post finishes. ';
+    if ( $remaining > 0 ) {
+        echo esc_html( $remaining ) . ' remaining.';
+    }
+    echo '</p></div>';
+}
+add_action( 'admin_notices', 'mdf_maybe_show_backfill_notice' );
+
+// ---------------------------------------------------------------------------
 // Activation / deactivation
 // ---------------------------------------------------------------------------
 
@@ -91,6 +573,7 @@ register_deactivation_hook( __FILE__, 'mdf_deactivate' );
 function mdf_activate(): void {
     mdf_create_table();
     mdf_schedule_purge();
+    mdf_create_cache_dirs();
 }
 
 function mdf_deactivate(): void {
@@ -327,15 +810,34 @@ function mdf_render_settings(): void {
     if ( ! current_user_can( 'manage_options' ) ) return;
 
     if ( isset( $_POST['mdf_save_settings'] ) && check_admin_referer( 'mdf_settings_save' ) ) {
-        update_option( 'mdf_sat_rate',      absint( $_POST['mdf_sat_rate'] ?? 1 ) );
-        update_option( 'mdf_usdc_rate',     floatval( $_POST['mdf_usdc_rate'] ?? 0.001 ) );
-        update_option( 'mdf_use_currency',  sanitize_text_field( $_POST['mdf_use_currency'] ?? 'sats' ) );
+        $old_offer = (bool) get_option( 'mdf_offer_markdown', false );
+
+        update_option( 'mdf_sat_rate',       absint( $_POST['mdf_sat_rate'] ?? 1 ) );
+        update_option( 'mdf_usdc_rate',      floatval( $_POST['mdf_usdc_rate'] ?? 0.001 ) );
+        update_option( 'mdf_use_currency',   sanitize_text_field( $_POST['mdf_use_currency'] ?? 'sats' ) );
+
+        $new_offer = isset( $_POST['mdf_offer_markdown'] ) && $_POST['mdf_offer_markdown'] === '1';
+        update_option( 'mdf_offer_markdown', $new_offer );
+
+        // Toggle just flipped from off → on: kick off full backfill.
+        if ( ! $old_offer && $new_offer ) {
+            update_option( 'mdf_backfill_notice_dismissed', false );
+            mdf_start_backfill();
+            echo '<div class="notice notice-info"><p><strong>MDF Analytics:</strong> Markdown offering enabled. Building markdown versions of all published posts — agents will be offered markdown as each post finishes. <a href="' . esc_url( admin_url( 'admin.php?page=mdf-analytics' ) ) . '">View dashboard →</a></p></div>';
+        } elseif ( $old_offer && ! $new_offer ) {
+            // Toggle flipped off: clear the backfill queue.
+            update_option( 'mdf_backfill_queue', [] );
+            update_option( 'mdf_backfill_total', null );
+            update_option( 'mdf_backfill_processed', 0 );
+        }
+
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
     }
 
-    $sat_rate     = (int)    get_option( 'mdf_sat_rate',     1 );
-    $usdc_rate    = (float)  get_option( 'mdf_usdc_rate',    0.001 );
-    $use_currency =          get_option( 'mdf_use_currency', 'sats' );
+    $sat_rate       = (int)    get_option( 'mdf_sat_rate',       1 );
+    $usdc_rate      = (float)  get_option( 'mdf_usdc_rate',      0.001 );
+    $use_currency   =          get_option( 'mdf_use_currency',   'sats' );
+    $offer_markdown = (bool)   get_option( 'mdf_offer_markdown', false );
     ?>
     <div class="wrap">
         <h1>MDF Analytics — Settings</h1>
@@ -358,6 +860,29 @@ function mdf_render_settings(): void {
                 <tr>
                     <th><label for="mdf_usdc_rate">Rate per markdown request (USDC)</label></th>
                     <td><input type="number" name="mdf_usdc_rate" id="mdf_usdc_rate" value="<?php echo esc_attr( $usdc_rate ); ?>" step="0.0001" min="0.0001" class="small-text"></td>
+                </tr>
+                <tr>
+                    <th><label for="mdf_offer_markdown">Offer markdown to agents</label></th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="mdf_offer_markdown" id="mdf_offer_markdown" value="1" <?php checked( $offer_markdown ); ?>>
+                            Enable pre-built markdown serving for <code>Accept: text/markdown</code> requests.  When enabled, every published post is converted to CommonMark and cached.  Agents requesting markdown for a post that has been converted will receive the cached <code>.md</code> file; posts not yet converted will fall through to normal HTML rendering.
+                        </label>
+                        <p class="description">Enabling this toggle automatically queues all published posts for conversion in the background.  No separate "pre-warm" step is needed.  Disabling stops markdown serving immediately.</p>
+                        <?php if ( mdf_backfill_in_progress() ) : ?>
+                            <p class="description" style="color:#2271b1;">
+                                <?php
+                                $total     = (int) get_option( 'mdf_backfill_total', 0 );
+                                $processed = (int) get_option( 'mdf_backfill_processed', 0 );
+                                printf(
+                                    'Backfill in progress: %d of %d posts converted.',
+                                    $processed,
+                                    $total
+                                );
+                                ?>
+                            </p>
+                        <?php endif; ?>
+                    </td>
                 </tr>
             </table>
             <p class="submit"><input type="submit" name="mdf_save_settings" class="button button-primary" value="Save Settings"></p>

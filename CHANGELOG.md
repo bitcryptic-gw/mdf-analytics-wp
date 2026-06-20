@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - Vendored `league/html-to-markdown` (v5.1.1) with namespace scoping (`MdfAnalytics\Vendor\League\HTMLToMarkdown`) to eliminate class-redeclaration collisions if another plugin also vendors the same upstream library. No Composer required at runtime — the library is source-committed. Scoped via `humbug/php-scoper`, built by `build-vendor.sh`.
+- Pre-build markdown cache pipeline: all published posts are converted to CommonMark on save (via WP-Cron background job) and served to clients that send `Accept: text/markdown`. Markdown is never served for a URL until a pre-built `.md` file actually exists for it — no live-conversion fallback.
+- Cache directory at `wp-content/uploads/mdf-cache/` with flat `posts/` layout, per-post `{post_id}.md` + `{post_id}.meta.json` sidecars, and a `manifest.json` aggregate.
+- Settings toggle "Offer markdown to agents" — enabling it auto-queues a full backfill of all published posts. Disabling stops markdown serving immediately.
+- `save_post` hook computes content hash (SHA-256 of `the_content()` post-filter output) and skips rebuilds when unchanged. Atomic temp-file + rename writes keep the old `.md` servable throughout a rebuild.
+- `template_redirect` negotiation gating: checks `file_exists()` against the cached `.md` (single filesystem stat, no sidecar JSON read at request time), sets `Vary: Accept` and `Content-Type: text/markdown` only when cached content exists.
+- Backfill uses batched WP-Cron (`mdf_backfill_batch`) to avoid flooding the cron queue; admin notice shows progress during backfill.
 
 ---
 

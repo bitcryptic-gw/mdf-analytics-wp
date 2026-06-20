@@ -1,4 +1,12 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# build-vendor.sh — Vendors and namespace-scopes league/html-to-markdown
+#
+# IMPORTANT: php-scoper 0.18.8+ requires PHP 8.2+.  The composer.json
+# constraint ^0.18 resolves to 0.18.7 on PHP 8.1 hosts.  If you upgrade
+# the host PHP beyond 8.1, Composer will resolve a newer php-scoper
+# automatically — no changes needed here.
+# ---------------------------------------------------------------------------
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
