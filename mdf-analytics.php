@@ -219,10 +219,101 @@ function mdf_manifest_write( array $manifest ): bool {
 }
 
 /**
+ * Acquire an exclusive lock on the manifest file and read its current
+ * contents.  Must be paired with mdf_manifest_write_and_unlock().
+ *
+ * The lock (advisory flock) prevents concurrent read-modify-write races
+ * across separate PHP processes (e.g. overlapping WP-Cron events or
+ * near-simultaneous save_post-triggered rebuilds).
+ *
+ * @return array{0: mixed, 1: array} File handle (or null on lock failure)
+ *                                    and the current manifest data.
+ */
+function mdf_manifest_lock_and_read(): array {
+    $path = mdf_manifest_path();
+    $dir  = dirname( $path );
+
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+    }
+
+    $handle = fopen( $path, 'c+' );
+    if ( $handle === false ) {
+        return [ null, [
+            'version'       => 1,
+            'last_full_run' => null,
+            'post_count'    => 0,
+            'failed_ids'    => [],
+        ] ];
+    }
+
+    if ( ! flock( $handle, LOCK_EX ) ) {
+        fclose( $handle );
+        return [ null, [
+            'version'       => 1,
+            'last_full_run' => null,
+            'post_count'    => 0,
+            'failed_ids'    => [],
+        ] ];
+    }
+
+    rewind( $handle );
+    $json = stream_get_contents( $handle );
+    if ( $json === false || $json === '' ) {
+        return [ $handle, [
+            'version'       => 1,
+            'last_full_run' => null,
+            'post_count'    => 0,
+            'failed_ids'    => [],
+        ] ];
+    }
+
+    $data = json_decode( $json, true );
+    return [ $handle, is_array( $data ) ? $data : [
+        'version'       => 1,
+        'last_full_run' => null,
+        'post_count'    => 0,
+        'failed_ids'    => [],
+    ] ];
+}
+
+/**
+ * Write the manifest via atomic temp-file + rename, then release the
+ * exclusive lock (and close the file handle) obtained by
+ * mdf_manifest_lock_and_read().
+ *
+ * @param mixed $handle   File handle from mdf_manifest_lock_and_read().
+ * @param array $manifest Manifest data to write.
+ * @return bool
+ */
+function mdf_manifest_write_and_unlock( $handle, array $manifest ): bool {
+    $path = mdf_manifest_path();
+    $dir  = dirname( $path );
+
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+    }
+
+    $tmp  = $path . '.' . getmypid() . '.tmp';
+    $json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
+
+    $ok = ( $json !== false && file_put_contents( $tmp, $json . "\n" ) !== false && rename( $tmp, $path ) );
+
+    if ( $handle !== null ) {
+        // After rename the handle points to the old (unlinked) inode.
+        // Release the lock and close — the old inode is freed automatically.
+        flock( $handle, LOCK_UN );
+        fclose( $handle );
+    }
+
+    return $ok;
+}
+
+/**
  * Update manifest after a single-post conversion result.
  */
 function mdf_manifest_record_result( int $post_id, bool $success ): void {
-    $manifest = mdf_manifest_read();
+    [ $handle, $manifest ] = mdf_manifest_lock_and_read();
 
     if ( $success ) {
         $manifest['failed_ids'] = array_values( array_diff( $manifest['failed_ids'], [ $post_id ] ) );
@@ -234,7 +325,7 @@ function mdf_manifest_record_result( int $post_id, bool $success ): void {
     }
 
     $manifest['last_full_run'] = gmdate( 'c' );
-    mdf_manifest_write( $manifest );
+    mdf_manifest_write_and_unlock( $handle, $manifest );
 }
 
 /**
@@ -370,10 +461,10 @@ function mdf_cron_backfill_batch(): void {
         }
     } else {
         // Backfill complete — update total count and clean up.
-        $manifest = mdf_manifest_read();
+        [ $handle, $manifest ]    = mdf_manifest_lock_and_read();
         $manifest['last_full_run'] = gmdate( 'c' );
         $manifest['post_count']    = count( mdf_list_cached_post_ids() );
-        mdf_manifest_write( $manifest );
+        mdf_manifest_write_and_unlock( $handle, $manifest );
         update_option( 'mdf_backfill_total', null );
     }
 

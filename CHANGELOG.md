@@ -18,6 +18,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `template_redirect` negotiation gating: checks `file_exists()` against the cached `.md` (single filesystem stat, no sidecar JSON read at request time), sets `Vary: Accept` and `Content-Type: text/markdown` only when cached content exists.
 - Backfill uses batched WP-Cron (`mdf_backfill_batch`) to avoid flooding the cron queue; admin notice shows progress during backfill.
 
+### Fixed
+- Manifest read-modify-write race: `manifest.json` updates are now wrapped with `flock(LOCK_EX)`, preventing concurrent WP-Cron-driven writes (e.g. overlapping `mdf_markdown_rebuild` and `mdf_backfill_batch` events) from silently clobbering each other. The lock provides advisory exclusion around `mdf_manifest_record_result()` and the backfill-completion path; the existing atomic temp-file + rename is retained for reader safety.
+
 ---
 
 ## [0.1.3] - 2026-06-10
