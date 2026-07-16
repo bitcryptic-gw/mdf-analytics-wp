@@ -448,8 +448,9 @@ function mdf_cron_backfill_batch(): void {
     $processed = 0;
 
     foreach ( $batch as $post_id ) {
-        mdf_convert_post( (int) $post_id );
-        $processed++;
+        if ( mdf_convert_post( (int) $post_id ) ) {
+            $processed++;
+        }
     }
 
     update_option( 'mdf_backfill_queue', $queue );
