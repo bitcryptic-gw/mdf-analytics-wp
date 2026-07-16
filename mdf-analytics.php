@@ -114,6 +114,9 @@ function mdf_create_cache_dirs(): void {
         wp_mkdir_p( $posts );
     }
 
+    @chmod( $base, 0775 );
+    @chmod( $posts, 0775 );
+
     $index = $base . '/index.html';
     if ( ! file_exists( $index ) ) {
         file_put_contents( $index, '' );
@@ -390,12 +393,20 @@ function mdf_convert_post( int $post_id ): bool {
         return false;
     }
 
-    // Write .md to temp first, then atomic rename.
-    $md_path = mdf_cache_posts_dir() . '/' . $post_id . '.md';
-    $md_dir  = mdf_cache_posts_dir();
+    $md_dir = mdf_cache_posts_dir();
     if ( ! is_dir( $md_dir ) ) {
         wp_mkdir_p( $md_dir );
     }
+    if ( ! is_writable( $md_dir ) ) {
+        if ( ! get_option( 'mdf_cache_writable_error' ) ) {
+            update_option( 'mdf_cache_writable_error', gmdate( 'c' ) . ' — Cache directory not writable by web server. Manual permissions fix required.' );
+        }
+        mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+
+    // Write .md to temp first, then atomic rename.
+    $md_path = $md_dir . '/' . $post_id . '.md';
     $md_tmp = $md_path . '.' . getmypid() . '.tmp';
     if ( file_put_contents( $md_tmp, $markdown ) === false ) {
         mdf_manifest_record_result( $post_id, false );
@@ -440,6 +451,17 @@ add_action( 'mdf_markdown_rebuild', 'mdf_cron_rebuild_post' );
  */
 function mdf_cron_backfill_batch(): void {
     if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return;
+    }
+
+    $posts_dir = mdf_cache_posts_dir();
+    if ( ! is_dir( $posts_dir ) ) {
+        wp_mkdir_p( $posts_dir );
+    }
+    if ( ! is_writable( $posts_dir ) ) {
+        if ( ! get_option( 'mdf_cache_writable_error' ) ) {
+            update_option( 'mdf_cache_writable_error', gmdate( 'c' ) . ' — Cache directory not writable by web server. Manual permissions fix required.' );
+        }
         return;
     }
 
@@ -924,6 +946,15 @@ function mdf_render_settings(): void {
         }
 
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
+    }
+
+    $posts_dir = mdf_cache_posts_dir();
+    if ( is_dir( $posts_dir ) && is_writable( $posts_dir ) ) {
+        delete_option( 'mdf_cache_writable_error' );
+    }
+    $cache_error = get_option( 'mdf_cache_writable_error' );
+    if ( $cache_error ) {
+        echo '<div class="notice notice-error"><p><strong>MDF Analytics:</strong> ' . esc_html( $cache_error ) . '</p></div>';
     }
 
     $sat_rate       = (int)    get_option( 'mdf_sat_rate',       1 );
