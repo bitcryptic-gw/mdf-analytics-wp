@@ -638,6 +638,15 @@ function mdf_maybe_serve_markdown(): void {
         }
     }
 
+    // Prevent WP Super Cache from caching this markdown response.
+    // Without this, WPSC maps text/markdown to text/html internally and
+    // shares the same cache key with normal HTML page views, causing a
+    // race where whichever representation is cached first gets served
+    // to all subsequent requests regardless of Accept header.
+    if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+        define( 'DONOTCACHEPAGE', true );
+    }
+
     status_header( 200 );
     header( 'Content-Type: text/markdown; charset=utf-8' );
     header( 'Content-Length: ' . $size );
