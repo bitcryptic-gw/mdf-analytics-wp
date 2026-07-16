@@ -3,7 +3,7 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
- * Version:     0.1.4
+ * Version:     0.1.6
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.4' );
+define( 'MDF_VERSION',    '0.1.6' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule

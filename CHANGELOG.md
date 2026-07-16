@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-16
+
 ### Fixed
 - Backfill batch processor (`mdf_cron_backfill_batch()`) no longer counts a post as
   processed when its conversion/write actually failed — `mdf_backfill_processed` now
@@ -22,8 +24,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of failing silently. The notice self-clears once the directory becomes writable again.
 - `mdf_create_cache_dirs()` now also attempts `chmod 0775` on the cache base and `posts/`
   directories at creation time, as a best-effort mitigation for installs where the directory
-  ends up owned by a different user than the one serving requests. This is not a complete fix
-  for an ownership (not just permission-mode) mismatch — see note below.
+  ends up owned by a different user than the one serving requests.
+
+### Changed
+- Settings page copy: "posts" replaced with "content" in the markdown-offering toggle
+  description and backfill progress status line, since the pipeline covers pages and
+  custom post types as well as posts.
+- Settings page "Phase 3 (roadmap)" description updated to "Phase 3 — shipped" since
+  the CommonMark auto-generation pipeline is now live. Phase 2 (wallet/earning) remains
+  the only future roadmap item.
 
 ### Known limitation
 - If plugin activation runs as a different user than the web server process (e.g. root during
