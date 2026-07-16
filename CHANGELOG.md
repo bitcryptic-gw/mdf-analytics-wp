@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Backfill batch processor (`mdf_cron_backfill_batch()`) no longer counts a post as
+  processed when its conversion/write actually failed — `mdf_backfill_processed` now
+  reflects successful conversions only, not attempts. Previously the counter incremented
+  unconditionally regardless of the return value of `mdf_convert_post()`, which could
+  make the admin UI report a completed backfill with zero cache files actually written.
+- Added a writability check for the markdown cache directory (`wp-content/uploads/mdf-cache/posts/`)
+  before attempting any write, in both the batch processor and `mdf_convert_post()` directly.
+  If the directory is not writable by the web server user, the failure is now recorded and
+  surfaced as a visible admin notice on the Settings page (`mdf_cache_writable_error` option),
+  instead of failing silently. The notice self-clears once the directory becomes writable again.
+- `mdf_create_cache_dirs()` now also attempts `chmod 0775` on the cache base and `posts/`
+  directories at creation time, as a best-effort mitigation for installs where the directory
+  ends up owned by a different user than the one serving requests. This is not a complete fix
+  for an ownership (not just permission-mode) mismatch — see note below.
+
+### Known limitation
+- If plugin activation runs as a different user than the web server process (e.g. root during
+  a Docker build step, vs. `www-data` serving real requests), the `chmod` added above may not
+  be sufficient to make the directory writable, since it changes permission mode but not
+  ownership. The runtime writability check and admin notice are the actual safety net in that
+  case. A cleaner fix (explicit ownership correction, or moving directory creation to first-request
+  time under the serving user) may be considered for a future release if this recurs.
+
 ## [0.1.4] - 2026-07-09
 
 ### Added
