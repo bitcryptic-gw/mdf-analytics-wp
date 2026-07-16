@@ -372,9 +372,36 @@ function mdf_convert_post( int $post_id ): bool {
         return false;
     }
 
-    // Apply the_content() filters so shortcodes / blocks are resolved to HTML.
-    $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+    // Ensure page-builder modules are loaded.  Some themes (e.g. Divi)
+    // conditionally load their builder framework only during real frontend
+    // requests and skip WP-Cron, leaving shortcodes unregistered even
+    // though the theme/content filters are technically active.
+    if ( function_exists( 'et_builder_add_main_elements' ) ) {
+        et_builder_add_main_elements();
+    }
 
+    // Establish a real singular-post query context so page-builder/theme
+    // content filters that gate on is_singular(), get_the_ID(), get_queried_object(),
+    // etc. can expand shortcodes correctly in the WP-Cron path.  A temporary
+    // WP_Query swapped into the global $wp_query ensures ALL is_*() conditionals
+    // behave correctly for the duration of the the_content filter chain.
+    global $wp_query;
+    $original_query = $wp_query;
+
+    $temp_query = new \WP_Query( [
+        'p'         => $post_id,
+        'post_type' => 'any',
+    ] );
+    if ( $temp_query->have_posts() ) {
+        $wp_query = $temp_query;
+        $temp_query->the_post();
+        $html = apply_filters( 'the_content', get_the_content() );
+    } else {
+        $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+    }
+
+    $wp_query = $original_query;
+    wp_reset_postdata();
     $hash = mdf_content_hash( $html );
 
     // Compare against existing sidecar — no-op if unchanged.
@@ -516,8 +543,32 @@ function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
     // Only act if markdown offering is enabled.
     if ( ! get_option( 'mdf_offer_markdown', false ) ) return;
 
-    // Compute hash of new content.
-    $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+    // Ensure page-builder modules are loaded (see mdf_convert_post).
+    if ( function_exists( 'et_builder_add_main_elements' ) ) {
+        et_builder_add_main_elements();
+    }
+
+    // Establish a real singular-post query context for the content hash
+    // computation so it matches what mdf_convert_post() produces when it
+    // actually rebuilds.  A temporary WP_Query swapped into the global
+    // $wp_query ensures ALL is_*() conditionals behave correctly.
+    global $wp_query;
+    $original_query = $wp_query;
+
+    $temp_query = new \WP_Query( [
+        'p'         => $post->ID,
+        'post_type' => 'any',
+    ] );
+    if ( $temp_query->have_posts() ) {
+        $wp_query = $temp_query;
+        $temp_query->the_post();
+        $html = apply_filters( 'the_content', get_the_content() );
+    } else {
+        $html = apply_filters( 'the_content', get_the_content( null, false, $post ) );
+    }
+
+    $wp_query = $original_query;
+    wp_reset_postdata();
     $hash = mdf_content_hash( $html );
 
     // Compare against existing sidecar.
