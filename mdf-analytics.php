@@ -989,7 +989,7 @@ function mdf_render_settings(): void {
                     <td>
                         <label>
                             <input type="checkbox" name="mdf_offer_markdown" id="mdf_offer_markdown" value="1" <?php checked( $offer_markdown ); ?>>
-                            Enable pre-built markdown serving for <code>Accept: text/markdown</code> requests.  When enabled, every published post is converted to CommonMark and cached.  Agents requesting markdown for a post that has been converted will receive the cached <code>.md</code> file; posts not yet converted will fall through to normal HTML rendering.
+                            Enable pre-built markdown serving for <code>Accept: text/markdown</code> requests.  When enabled, all published content is converted to CommonMark and cached.  Agents requesting markdown for content that has been converted will receive the cached <code>.md</code> file; content not yet converted will fall through to normal HTML rendering.
                         </label>
                         <p class="description">Enabling this toggle automatically queues all published posts for conversion in the background.  No separate "pre-warm" step is needed.  Disabling stops markdown serving immediately.</p>
                         <?php if ( mdf_backfill_in_progress() ) : ?>
@@ -998,7 +998,7 @@ function mdf_render_settings(): void {
                                 $total     = (int) get_option( 'mdf_backfill_total', 0 );
                                 $processed = (int) get_option( 'mdf_backfill_processed', 0 );
                                 printf(
-                                    'Backfill in progress: %d of %d posts converted.',
+                                    'Backfill in progress: %d of %d pieces of content converted.',
                                     $processed,
                                     $total
                                 );
@@ -1016,7 +1016,7 @@ function mdf_render_settings(): void {
         It tracks AI agent traffic and <code>Accept: text/markdown</code> requests to your site, giving you visibility into potential earnings
         before you set up a wallet or serve markdown content.</p>
         <p><strong>Phase 2 (roadmap):</strong> Connect a Lightning or Base wallet and start earning from agents that request markdown.</p>
-        <p><strong>Phase 3 (roadmap):</strong> Auto-generate CommonMark from your post content — no manual work required.</p>
+        <p><strong>Phase 3 — shipped:</strong> Published content is automatically converted to CommonMark and cached — no manual work required. Enable it above under "Offer markdown to agents."</p>
     </div>
     <?php
 }
