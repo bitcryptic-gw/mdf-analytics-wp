@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-16
+
 ### Fixed
 - Prevent WP Super Cache from caching markdown responses by defining
   `DONOTCACHEPAGE` in `mdf_maybe_serve_markdown()` before serving output.
