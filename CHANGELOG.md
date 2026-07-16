@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Prevent WP Super Cache from caching markdown responses by defining
+  `DONOTCACHEPAGE` in `mdf_maybe_serve_markdown()` before serving output.
+  WPSC internally maps `text/markdown` to `text/html` in `wpsc_get_accept_header()`,
+  which caused markdown and HTML responses for the same URL to share a cache
+  key — whichever representation was cached first would be served to ALL
+  subsequent requests regardless of their `Accept` header.  This fixes the
+  "markdown gets cached and served to HTML requesters" direction.
+- Page-builder shortcode expansion (e.g. Divi's `[et_pb_*]` shortcodes) now works
+  in WP-Cron context by establishing proper singular-post query context and
+  force-loading page-builder modules that gate on `is_singular()`/`get_the_ID()`.
+
+### Known limitation
+- The reverse WP Super Cache race condition (HTML cached first, blocking
+  markdown requests) is not fixed by this release.  It requires a change in
+  WP Super Cache's own plugin extension directory to teach `wpsc_get_accept_header()`
+  about `text/markdown`.  This is tracked as a separate operational task.
+
 ## [0.1.6] - 2026-07-16
 
 ### Fixed
