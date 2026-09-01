@@ -20,6 +20,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing purge cron and on admin page loads — no new cron schedule).
   Previously the backfill could stall indefinitely with a populated queue and
   no scheduled event, requiring a manual Settings-toggle re-trigger.
+- Per-post markdown rebuilds (`mdf_markdown_rebuild`, queued on `save_post`
+  when edited content changes) get the same protection: scheduling now verifies
+  the single event persisted and retries once, records a lightweight per-post
+  pending marker, and the self-heal check re-schedules any stale pending
+  rebuild whose event was lost to the same cron write race.
 
 ### Added
 - Persistent markdown-coverage status line on the Settings page, shown whenever

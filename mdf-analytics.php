@@ -468,6 +468,10 @@ function mdf_convert_post( int $post_id ): bool {
  */
 function mdf_cron_rebuild_post( int $post_id ): void {
     mdf_convert_post( $post_id );
+    // Rebuild ran (success or not) — clear the pending marker so the self-heal
+    // check doesn't treat this as a lost schedule. Conversion failures are
+    // tracked separately via the manifest's failed_ids.
+    delete_post_meta( $post_id, 'mdf_pending_rebuild' );
 }
 add_action( 'mdf_markdown_rebuild', 'mdf_cron_rebuild_post' );
 
@@ -587,9 +591,21 @@ add_action( 'save_post', 'mdf_on_save_post', 20, 3 );
  */
 function mdf_schedule_post_rebuild( int $post_id ): void {
     $args = [ $post_id ];
+
+    // Schedule, then verify it actually persisted — the same cron-option write
+    // race that can drop mdf_backfill_batch (see mdf_start_backfill). Retry once.
     if ( ! wp_next_scheduled( 'mdf_markdown_rebuild', $args ) ) {
         wp_schedule_single_event( time() + 5, 'mdf_markdown_rebuild', $args );
+        if ( ! wp_next_scheduled( 'mdf_markdown_rebuild', $args ) ) {
+            wp_schedule_single_event( time() + 5, 'mdf_markdown_rebuild', $args );
+            if ( ! wp_next_scheduled( 'mdf_markdown_rebuild', $args ) ) {
+                error_log( "MDF Analytics: mdf_markdown_rebuild for post {$post_id} not scheduled after retry — the self-heal check will attempt recovery." );
+            }
+        }
     }
+
+    // Record the pending rebuild so the self-heal check can detect a lost event.
+    update_post_meta( $post_id, 'mdf_pending_rebuild', time() );
 }
 
 // ---------------------------------------------------------------------------
@@ -991,27 +1007,50 @@ function mdf_run_purge(): void {
 }
 
 /**
- * Recover a stuck backfill: if the queue still has work but the
- * mdf_backfill_batch single event is not scheduled (its cron-option write was
- * lost to a race with another scheduler), re-schedule it. Runs on the existing
+ * Recover a stuck backfill or a lost per-post rebuild. Runs on the existing
  * purge cron (guaranteed daily recovery) and on admin page loads (fast recovery
  * while an admin is working) — no new cron schedule.
+ *
+ * 1. Backfill: if the queue still has work but the mdf_backfill_batch single
+ *    event is not scheduled (its cron-option write was lost to a race with
+ *    another scheduler), re-schedule it.
+ * 2. Per-post rebuilds: if a post carries a stale mdf_pending_rebuild marker
+ *    (older than the grace window) with no scheduled mdf_markdown_rebuild
+ *    event, its schedule was lost the same way — re-schedule it.
  */
 function mdf_maybe_reschedule_backfill(): void {
     if ( ! get_option( 'mdf_offer_markdown', false ) ) {
         return;
     }
 
+    // Backfill: queue still has work but no batch event pending.
     $queue = get_option( 'mdf_backfill_queue', [] );
-    if ( empty( $queue ) || ! is_array( $queue ) ) {
-        return;
+    if ( ! empty( $queue ) && is_array( $queue ) && ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+        wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
     }
 
-    if ( wp_next_scheduled( 'mdf_backfill_batch' ) ) {
-        return;
-    }
+    // Per-post rebuilds: stale pending marker with no scheduled event. The grace
+    // window exceeds the +5s schedule delay plus the cron tick interval, so a
+    // legitimately pending rebuild (event scheduled, waiting to fire) is never
+    // matched — only one whose event was genuinely lost.
+    $pending = get_posts( [
+        'post_type'        => 'any',
+        'post_status'      => 'any',
+        'fields'           => 'ids',
+        'posts_per_page'   => 100,
+        'no_found_rows'    => true,
+        'meta_key'         => 'mdf_pending_rebuild',
+        'meta_value'       => time() - 10 * MINUTE_IN_SECONDS,
+        'meta_compare'     => '<',
+        'meta_type'        => 'NUMERIC',
+    ] );
 
-    wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
+    foreach ( $pending as $post_id ) {
+        $post_id = (int) $post_id;
+        if ( ! wp_next_scheduled( 'mdf_markdown_rebuild', [ $post_id ] ) ) {
+            mdf_schedule_post_rebuild( $post_id );
+        }
+    }
 }
 add_action( 'mdf_purge_old_records', 'mdf_maybe_reschedule_backfill' );
 add_action( 'admin_init', 'mdf_maybe_reschedule_backfill' );
