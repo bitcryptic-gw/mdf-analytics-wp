@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-01
+
+### Fixed
+- Backfill recovery when the scheduled `mdf_backfill_batch` single cron event
+  is lost to a race with another scheduler (observed in production with Action
+  Scheduler). `mdf_start_backfill()` now verifies the event persisted after
+  scheduling and retries once, and a self-heal check re-schedules the batch
+  whenever the queue still has work but no batch event is pending (runs on the
+  existing purge cron and on admin page loads — no new cron schedule).
+  Previously the backfill could stall indefinitely with a populated queue and
+  no scheduled event, requiring a manual Settings-toggle re-trigger.
+
 ## [0.1.8] - 2026-09-01
 
 ### Added
@@ -143,7 +155,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 2 callout CTA in dashboard footer.
 - No IP addresses stored. No external HTTP requests. No dependencies beyond WordPress core.
 
-[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.7...v0.1.8
 [0.1.4]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.2...v0.1.3
