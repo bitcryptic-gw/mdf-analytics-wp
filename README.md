@@ -73,11 +73,13 @@ This is also where you enable **"Offer markdown to agents"** — the toggle that
 
 ### llms.txt serving
 
-The plugin ships a curated `llms.txt` file in the plugin directory and serves it at the site root (`/llms.txt`).
+The plugin ships a generic, owner-editable `llms.txt` template in the plugin directory and serves it virtually at the site root (`/llms.txt`) — nothing is ever written to your WordPress installation's actual root directory. Edit the template's placeholder sections (site summary, key pages) to describe your own site; the "Machine-readable content" section at the bottom, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing.
 
-> **Note:** the file shipped with the plugin is the author's own profile and MDF links, not a neutral template. If you activate this plugin on your site, edit `llms.txt` in the plugin directory before (or immediately after) activation so you're not serving someone else's bio at your own `/llms.txt`.
+**If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The plugin never reads, edits, or deletes your existing file.
 
-Requests to `/llms.txt` appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
+Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
+
+**On uninstall** (not deactivation — deactivating leaves everything in place), the plugin removes its own data: the database table, all generated markdown cache files, and its options. It never touches a web-root `llms.txt`, static or otherwise, since it never created one.
 
 ---
 
