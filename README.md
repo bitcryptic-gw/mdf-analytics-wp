@@ -1,6 +1,6 @@
 # MDF Analytics for WordPress
 
-A WordPress plugin that gives you visibility into AI agent traffic hitting your site — before you do anything else.
+A WordPress plugin that gives you visibility into AI agent traffic hitting your site — and, since v0.1.4, lets you start serving clean markdown to agents that ask for it.
 
 Part of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) ecosystem.
 
@@ -10,21 +10,19 @@ Part of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) ecosyst
 
 AI agents now represent [over 57% of web traffic](https://blog.cloudflare.com/application-security-2024/). Most of them are silently scraping your content, burning tokens to parse HTML, and moving on — with no signal to you and no value exchange in either direction.
 
-MDF proposes a better model: serve clean markdown directly to agents via HTTP content negotiation, with access policy expressed through price. Before you commit to that, you need to know what you're working with.
-
-That's what this plugin does.
+MDF proposes a better model: serve clean markdown directly to agents via HTTP content negotiation, with access policy expressed through price. This plugin gives you visibility into that traffic first, and an opt-in path to start serving markdown.
 
 ---
 
 ## What it does
 
-MDF Analytics is a **passive observer**. It intercepts requests to your WordPress site, classifies each visitor as a known AI agent, likely automated client, internal/monitor, or human browser, and logs the relevant data. It does not modify any content, serve any markdown, or handle any payments.
+MDF Analytics classifies every request to your WordPress site — known AI agent, likely automated client, internal/monitor, or human browser — and logs the relevant data. As of v0.1.6, it can also **serve markdown directly**: turn on "Offer markdown to agents" in Settings, and requests sending `Accept: text/markdown` receive a pre-generated CommonMark version of the page instead of HTML, at the same URL (`Vary: Accept`). Browsers are unaffected.
 
 The dashboard shows you:
 
 - How many AI agents are hitting your site, and which ones
 - Whether any are already sending `Accept: text/markdown` headers
-- What you would have earned if you'd been serving paid markdown content
+- What you would have earned if you'd been serving *paid* markdown content (payments are not yet implemented — see Roadmap)
 - A daily trend chart of inbound agent traffic
 - A separate table for internal/monitor traffic (uptime checkers, WordPress core calls) so they don't inflate your agent counts
 
@@ -34,12 +32,16 @@ The dashboard shows you:
 
 ## Installation
 
-1. Download `mdf-analytics.php` from this repository
-2. In your WordPress admin, go to **Plugins → Add New → Upload Plugin**
-3. Upload the file and activate
-4. Find **MDF Analytics** in the left admin menu
+The plugin is **multi-file** as of v0.1.4 — it ships a vendored, namespaced copy of `league/html-to-markdown` in `vendor/`, which `mdf-analytics.php` requires to load.
 
-That's it. The plugin starts logging immediately.
+> **Do not** upload `mdf-analytics.php` on its own. Without the `vendor/` directory alongside it, WordPress will fatal-error on activation.
+
+1. Download the plugin as a zip — **Code ▸ Download ZIP** on this repository (or the latest release archive, once packaged releases are available).
+2. In your WordPress admin, go to **Plugins → Add New → Upload Plugin**.
+3. Upload the zip and click **Activate**.
+4. Find **MDF Analytics** in the left admin menu.
+
+The plugin starts logging immediately. To also serve markdown to agents, go to **Settings** and enable **"Offer markdown to agents."**
 
 ---
 
@@ -67,9 +69,28 @@ Switch between last 7, 30, or 90 days. Default is 30 days.
 
 Configure your preferred currency (sats via Lightning or USDC via Base) and the per-request rate used for estimated earnings calculations. The defaults are 1 sat and $0.001 USDC — broadly in line with MDF micropayment tier pricing.
 
+This is also where you enable **"Offer markdown to agents"** — the toggle that turns on markdown serving for requests sending `Accept: text/markdown`.
+
 ### llms.txt serving
 
-The plugin ships a curated `llms.txt` file in the plugin directory and serves it at the site root (`/llms.txt`). Site owners can edit the `llms.txt` file in the plugin directory to customise the content. Requests to `/llms.txt` appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
+The plugin ships a curated `llms.txt` file in the plugin directory and serves it at the site root (`/llms.txt`).
+
+> **Note:** the file shipped with the plugin is the author's own profile and MDF links, not a neutral template. If you activate this plugin on your site, edit `llms.txt` in the plugin directory before (or immediately after) activation so you're not serving someone else's bio at your own `/llms.txt`.
+
+Requests to `/llms.txt` appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
+
+---
+
+## Markdown serving
+
+Since v0.1.4, the plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
+
+Conversion is handled by the vendored `league/html-to-markdown` library.
+
+### Known limitations
+
+- **WP Super Cache — reverse race condition.** As of v0.1.7, the plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction is not yet fixed: if WPSC caches the **HTML** response for a URL first, markdown requests to that same URL can be blocked from ever reaching an agent, because WPSC's `wpsc_get_accept_header()` maps `text/markdown` to `text/html` internally and treats them as the same cache entry. Fixing this fully requires a change in WP Super Cache's own plugin extension directory, not just this plugin. If you run WP Super Cache, be aware the dashboard's "wanted markdown" figures may undercount on cached URLs.
+- **HTML entity decoding.** Standard HTML entities (e.g. `&amp;`) are currently preserved as-is in converted markdown rather than decoded, so agents may see `&amp;` where a human reader would see `&`. This doesn't break parsing but is cosmetically imperfect.
 
 ---
 
@@ -88,11 +109,10 @@ Only types 1, 2, and 3 — plus any `Accept: text/markdown` requests — are wri
 
 ## Roadmap
 
-### Phase 2 — Wallet integration
-Connect a Lightning wallet (via Alby) or a Base USDC wallet and start serving real 402 responses to agents that request markdown. The plugin begins earning from the traffic the dashboard is already showing you.
+### Phase 2 — Wallet integration & paid markdown
+Connect a wallet and start serving real `402` responses to agents that request markdown, with price-gated access enforced via the x402 payment rail. Blocked on the upstream payment-verification oracle reaching commercial launch — see [CHANGELOG.md](CHANGELOG.md) for status.
 
-### Phase 3 — Markdown generation
-Auto-generate CommonMark from your WordPress post and page content. No manual authoring required — flip one toggle and every piece of content has a markdown version available for sale.
+Markdown generation itself (previously listed as "Phase 3") already shipped in v0.1.6 — see [Markdown serving](#markdown-serving) above.
 
 ---
 
@@ -112,6 +132,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.7 | 2026-07-16 | Fix: `DONOTCACHEPAGE` set before serving markdown, preventing WP Super Cache from sharing a cache key between markdown and HTML responses for the same URL. Fix: page-builder shortcode expansion (e.g. Divi) now works correctly in WP-Cron context. See [CHANGELOG.md](CHANGELOG.md). |
+| 0.1.6 | 2026-07-16 | Fix: backfill no longer counts failed conversions as processed. Added: writability check + admin notice for the markdown cache directory. Roadmap copy updated — markdown generation is shipped, not Phase 3. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.4 | 2026-07-09 | Vendored, namespaced `league/html-to-markdown`. Pre-build markdown cache pipeline with negotiation gating and `file_exists()` gate. `flock(LOCK_EX)` manifest locking. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.3 | 2026-06-10 | Added: plugin serves curated `llms.txt` at the site root (`/llms.txt`). Supports GET/HEAD, conditional requests, and 1-hour caching. Requests logged through existing classifier. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.2 | 2026-06-10 | Fix: known-agent snippets now show matched fragment (e.g. `Googlebot`) rather than raw UA prefix (`Mozilla`) |
@@ -123,10 +145,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 ## Requirements
 
 - WordPress 6.0+
-- PHP 8.0+
+- PHP 8.0+ (see `composer.json` for the precise constraint)
 - MySQL 5.7+ or MariaDB 10.3+
 
-No additional dependencies. No Composer. No npm.
+No Composer or npm runtime dependency — the plugin ships its dependencies vendored.
 
 ---
 
