@@ -1,0 +1,110 @@
+name: Build & attach release zip
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          echo "tag=${GITHUB_REF_NAME}"
+          echo "version=${GITHUB_REF_NAME#v}"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble mdf-analytics/ staging directory
+        run: |
+          set -euo pipefail
+          rm -rf mdf-analytics
+          mkdir -p mdf-analytics
+          # Materialize exactly the tagged tree (tracked files only — no .git/),
+          # then drop the dev/build tooling that must not ship. vendor/ is fully
+          # committed and is included as-is; no build step is required.
+          git archive HEAD | tar -x -C mdf-analytics/
+          rm -rf \
+            mdf-analytics/.github \
+            mdf-analytics/boot \
+            mdf-analytics/build-vendor.sh \
+            mdf-analytics/composer.json \
+            mdf-analytics/composer.lock \
+            mdf-analytics/scoper.inc.php \
+            mdf-analytics/screenshots
+
+      - name: Build zip
+        run: |
+          set -euo pipefail
+          rm -f "mdf-analytics-${{ steps.version.outputs.version }}.zip"
+          zip -r -q "mdf-analytics-${{ steps.version.outputs.version }}.zip" mdf-analytics
+
+      - name: Verify zip structure and version
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP="mdf-analytics-${VERSION}.zip"
+          rm -rf verify && mkdir -p verify
+          unzip -q "$ZIP" -d verify
+          # Required: main plugin file exactly at mdf-analytics/mdf-analytics.php.
+          test -f verify/mdf-analytics/mdf-analytics.php || {
+            echo "::error::missing mdf-analytics/mdf-analytics.php in ${ZIP}"; exit 1;
+          }
+          # Required: the zip's Version: header must match the pushed tag.
+          IN_ZIP="$(sed -nE 's/^[[:space:]]*\*[[:space:]]*Version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' verify/mdf-analytics/mdf-analytics.php | head -n1)"
+          if [ -z "${IN_ZIP}" ]; then
+            echo "::error::could not read Version: header from verify/mdf-analytics/mdf-analytics.php"; exit 1;
+          fi
+          if [ "${IN_ZIP}" != "${VERSION}" ]; then
+            echo "::error::version mismatch — zip header ${IN_ZIP}, tag ${VERSION}"; exit 1;
+          fi
+          # Extra guards: vendored library present, excluded dev tooling absent.
+          test -f verify/mdf-analytics/vendor/autoload.php || {
+            echo "::error::missing vendor/autoload.php in ${ZIP}"; exit 1;
+          }
+          for p in .github boot build-vendor.sh composer.json composer.lock scoper.inc.php screenshots; do
+            if [ -e "verify/mdf-analytics/${p}" ]; then
+              echo "::error::excluded path present in zip: ${p}"; exit 1;
+            fi
+          done
+          echo "Verified: ${ZIP} contains mdf-analytics/mdf-analytics.php (v${VERSION}) and excludes dev tooling."
+
+      - name: Extract CHANGELOG section for release body
+        id: body
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v h="## [${VERSION}]" '
+            index($0, h) == 1 { in_section = 1; next }
+            in_section && index($0, "## [") == 1 { exit }
+            in_section && $0 ~ /^\[[A-Za-z0-9._-]+\]: http/ { exit }
+            in_section { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-body.md"
+          if [ ! -s "$RUNNER_TEMP/release-body.md" ]; then
+            echo "No [${VERSION}] section in CHANGELOG.md — using fallback body."
+            echo "See CHANGELOG.md for details." > "$RUNNER_TEMP/release-body.md"
+          fi
+          echo "body_file=${RUNNER_TEMP}/release-body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release and attach zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: mdf-analytics-${{ steps.version.outputs.version }}.zip
+          BODY_FILE: ${{ steps.body.outputs.body_file }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — attaching zip to it."
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            echo "Creating release ${TAG} and attaching ${ZIP}."
+            gh release create "$TAG" "$ZIP" --title "$TAG" --notes-file "$BODY_FILE" --verify-tag
+          fi
