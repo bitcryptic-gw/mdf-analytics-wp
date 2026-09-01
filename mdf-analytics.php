@@ -711,6 +711,28 @@ function mdf_backfill_in_progress(): bool {
     return count( $queue ) > 0;
 }
 
+/**
+ * Count published posts/pages eligible for markdown conversion — i.e. the same
+ * set the backfill processes (all public post types, publish status). One cheap
+ * indexed COUNT query; used only on Settings-page load for the status line.
+ */
+function mdf_eligible_content_count(): int {
+    $post_types = get_post_types( [ 'public' => true ] );
+    if ( empty( $post_types ) ) {
+        return 0;
+    }
+
+    global $wpdb;
+    $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+
+    return (int) $wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ({$placeholders})",
+            $post_types
+        )
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Admin notice during backfill
 // ---------------------------------------------------------------------------
@@ -1248,18 +1270,36 @@ function mdf_render_settings(): void {
                             Enable pre-built markdown serving for <code>Accept: text/markdown</code> requests.  When enabled, all published content is converted to CommonMark and cached.  Agents requesting markdown for content that has been converted will receive the cached <code>.md</code> file; content not yet converted will fall through to normal HTML rendering.
                         </label>
                         <p class="description">Enabling this toggle automatically queues all published posts for conversion in the background.  No separate "pre-warm" step is needed.  Disabling stops markdown serving immediately.</p>
-                        <?php if ( mdf_backfill_in_progress() ) : ?>
-                            <p class="description" style="color:#2271b1;">
-                                <?php
-                                $total     = (int) get_option( 'mdf_backfill_total', 0 );
-                                $processed = (int) get_option( 'mdf_backfill_processed', 0 );
-                                printf(
-                                    'Backfill in progress: %d of %d pieces of content converted.',
-                                    $processed,
-                                    $total
-                                );
-                                ?>
-                            </p>
+                        <?php if ( $offer_markdown ) : ?>
+                            <?php if ( mdf_backfill_in_progress() ) : ?>
+                                <p class="description" style="color:#2271b1;">
+                                    <?php
+                                    $total     = (int) get_option( 'mdf_backfill_total', 0 );
+                                    $processed = (int) get_option( 'mdf_backfill_processed', 0 );
+                                    printf(
+                                        'Backfill in progress: %d of %d pieces of content converted.',
+                                        $processed,
+                                        $total
+                                    );
+                                    ?>
+                                </p>
+                            <?php else : ?>
+                                <p class="description">
+                                    <?php
+                                    $cached   = count( mdf_list_cached_post_ids() );
+                                    $eligible = mdf_eligible_content_count();
+                                    if ( $eligible === 0 ) {
+                                        echo 'No published content yet to convert.';
+                                    } else {
+                                        printf(
+                                            '%d of %d published posts/pages have a cached markdown version.',
+                                            $cached,
+                                            $eligible
+                                        );
+                                    }
+                                    ?>
+                                </p>
+                            <?php endif; ?>
                         <?php endif; ?>
                     </td>
                 </tr>

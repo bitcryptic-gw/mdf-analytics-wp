@@ -21,6 +21,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Previously the backfill could stall indefinitely with a populated queue and
   no scheduled event, requiring a manual Settings-toggle re-trigger.
 
+### Added
+- Persistent markdown-coverage status line on the Settings page, shown whenever
+  "Offer markdown to agents" is enabled: while a backfill runs it keeps the
+  existing in-progress counter; once complete it shows "N of M published
+  posts/pages have a cached markdown version." (live count of cached `.md`
+  files vs. published content eligible for conversion), or "No published
+  content yet to convert." on an empty site. Hidden when the toggle is off.
+
 ## [0.1.8] - 2026-09-01
 
 ### Added
