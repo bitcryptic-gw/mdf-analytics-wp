@@ -689,9 +689,17 @@ function mdf_start_backfill(): void {
     update_option( 'mdf_backfill_total', $total );
     update_option( 'mdf_backfill_processed', 0 );
 
-    // Schedule the first batch.
+    // Schedule the first batch, then verify it actually persisted. The single-event
+    // cron write can race with other schedulers (e.g. Action Scheduler) and be
+    // silently dropped before it ever fires — retry once if the first write lost.
     if ( ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
         wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
+        if ( ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+            wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
+            if ( ! wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+                error_log( 'MDF Analytics: mdf_backfill_batch not scheduled after retry — the self-heal check will attempt recovery.' );
+            }
+        }
     }
 }
 
@@ -959,6 +967,32 @@ function mdf_run_purge(): void {
     $threshold = gmdate( 'Y-m-d H:i:s', strtotime( '-' . MDF_LOG_DAYS . ' days' ) );
     $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE requested_at < %s", $threshold ) );
 }
+
+/**
+ * Recover a stuck backfill: if the queue still has work but the
+ * mdf_backfill_batch single event is not scheduled (its cron-option write was
+ * lost to a race with another scheduler), re-schedule it. Runs on the existing
+ * purge cron (guaranteed daily recovery) and on admin page loads (fast recovery
+ * while an admin is working) — no new cron schedule.
+ */
+function mdf_maybe_reschedule_backfill(): void {
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return;
+    }
+
+    $queue = get_option( 'mdf_backfill_queue', [] );
+    if ( empty( $queue ) || ! is_array( $queue ) ) {
+        return;
+    }
+
+    if ( wp_next_scheduled( 'mdf_backfill_batch' ) ) {
+        return;
+    }
+
+    wp_schedule_single_event( time() + 3, 'mdf_backfill_batch' );
+}
+add_action( 'mdf_purge_old_records', 'mdf_maybe_reschedule_backfill' );
+add_action( 'admin_init', 'mdf_maybe_reschedule_backfill' );
 
 // ---------------------------------------------------------------------------
 // Request logging — fires on shutdown so status code is finalised
