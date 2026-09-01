@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-01
+
+### Added
+- `register_uninstall_hook` — removes the `mdf_requests` database table,
+  recursively deletes the `wp-content/uploads/mdf-cache` directory, and
+  clears all plugin options and scheduled cron events on uninstall.
+  Deactivation remains a no-op; only a full uninstall triggers cleanup.
+- Activation-time detection of a pre-existing static `/llms.txt` in the
+  web root (`mdf_static_llms_txt_detected` option, rechecked on
+  `admin_init` so it self-clears if the situation changes). Shows a
+  dismissible admin notice explaining that the existing file takes
+  priority and nothing has been changed, with a copy-to-clipboard button
+  for a standalone "Machine-readable content" snippet the site owner can
+  add to their existing file by hand.
+
+### Changed
+- Replaced the bundled `llms.txt` with a generic, owner-editable
+  template (site name/summary/key-pages placeholders plus the
+  markdown-negotiation section), removing the previous default which
+  contained the plugin author's personal profile content.
+
+### Fixed
+- N/A this release — see Added/Changed above.
+
 ## [0.1.7] - 2026-07-16
 
 ### Fixed
@@ -119,7 +143,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 2 callout CTA in dashboard footer.
 - No IP addresses stored. No external HTTP requests. No dependencies beyond WordPress core.
 
-[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.7...v0.1.8
 [0.1.4]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.1...v0.1.2

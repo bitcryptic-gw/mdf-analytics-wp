@@ -132,6 +132,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.8 | 2026-09-01 | Added: uninstall hook removes the DB table, markdown cache directory, plugin options, and scheduled events. Added: activation-time detection + dismissible admin notice for a pre-existing static `/llms.txt`, with a copy-paste "Machine-readable content" snippet. Changed: bundled `llms.txt` replaced with a generic owner-editable template. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.7 | 2026-07-16 | Fix: `DONOTCACHEPAGE` set before serving markdown, preventing WP Super Cache from sharing a cache key between markdown and HTML responses for the same URL. Fix: page-builder shortcode expansion (e.g. Divi) now works correctly in WP-Cron context. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.6 | 2026-07-16 | Fix: backfill no longer counts failed conversions as processed. Added: writability check + admin notice for the markdown cache directory. Roadmap copy updated — markdown generation is shipped, not Phase 3. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.4 | 2026-07-09 | Vendored, namespaced `league/html-to-markdown`. Pre-build markdown cache pipeline with negotiation gating and `file_exists()` gate. `flock(LOCK_EX)` manifest locking. See [CHANGELOG.md](CHANGELOG.md). |
