@@ -1,35 +1,23 @@
-# BitCryptic™
+# [Site Name]
 
-> Gary Walker (BitCryptic™) — systems administrator and infrastructure engineer, Sydney, Australia. Four decades in technology, from early Australian internet infrastructure to co-founding Fetch TV, Australia's first commercial IPTV platform. Current focus: self-hosted AI infrastructure, DePIN, cybersecurity, and open web standards for AI agents.
+> [One or two sentences describing what this site is and who it's for. Replace this line — it's the most important part of this file for AI agents deciding whether to read further.]
 
-Primary current work: **MDF (Markdown First)** — an open web standards proposal for an agent-readable web. MDF defines how sites serve clean markdown to AI agents via HTTP content negotiation (`Accept: text/markdown`) at existing URLs, with access policy expressed through price using the x402 (EVM/stablecoin) and L402 (Bitcoin/Lightning) payment standards. Co-authored with Graham Hall (Slepner). MIT licensed.
+[Optional: a short paragraph of additional context — what the site covers, who runs it, anything an agent should know before crawling further. Delete this paragraph if the summary line above is enough.]
 
-## MDF — Markdown First
+## Key pages
 
-- [MDF Specification (CONCEPT.md)](https://raw.githubusercontent.com/bitcryptic-gw/mdf/main/CONCEPT.md): Full proposal and architecture spec, v0.1.0-draft
-- [MDF README](https://raw.githubusercontent.com/bitcryptic-gw/mdf/main/README.md): Problem summary, status, live demo links
-- [mdf.json JSON Schema](https://raw.githubusercontent.com/bitcryptic-gw/mdf/main/mdf.schema.json): JSON Schema (Draft 2020-12) for the /mdf.json capability document
-- [Live MDF demo server](https://mdf-demo.bitcryptic.com/): Working reference implementation with free, Lightning micropayment (1 sat), and premium ($1 USDC) content tiers
-- [Demo server capability document](https://mdf-demo.bitcryptic.com/mdf.json): Machine-readable /mdf.json example
-- [Demo server llms.txt](https://mdf-demo.bitcryptic.com/llms.txt): Auto-generated content index
-- [MDF reference server source](https://github.com/bitcryptic-gw/mdf-reference-server): Self-hostable Bun/Docker implementation, Docker Hub: bitcryptic/mdf-server
-- [MDF validator](https://github.com/bitcryptic-gw/mdf-validator): CLI tool for validating MDF deployments
-- [MDF Analytics WordPress plugin](https://github.com/bitcryptic-gw/mdf-analytics-wp): Tracks AI agent traffic and Accept: text/markdown requests on WordPress sites
-
-## Blog
-
-- [BitCryptic Blog](https://blog.bitcryptic.com/): Writing on MDF, agent payments, self-hosted infrastructure, and DePIN
-
-## About Gary Walker
-
-- [About / career timeline](https://bitcryptic.com/): Telecom Australia (1985), early Australian ISP co-founder (NetConnect Communications), Fetch TV co-founder and technical lead (2008–2017), independent since 2017
-- [GitHub](https://github.com/bitcryptic-gw): All public repositories
-- Contact: gary@bitcryptic.com
+- [Homepage](/): [one-line description]
+- [About](/about/): [one-line description]
+- [Add more links to your most important pages here]
 
 ## Optional
 
-- [Pi Network](https://minepi.com/BitCrypticGW): DePIN — mobile cryptocurrency network participant
-- [Acurast](https://hub.acurast.com/): DePIN — decentralised compute; 16 processor phones on mainnet
-- [WeatherXM station](https://explorer.weatherxm.com/cells/87be0e228ffffff): DePIN — decentralised weather data contributor
-- [Helium Network](https://www.helium.com/): DePIN — LoRaWAN and 5G hotspot operator
-- [Wingbits](https://wingbits.com/): DePIN — ADS-B aircraft tracking ground station operator
+- [Lower-priority pages, archives, or reference material can go here]
+
+---
+
+## Machine-readable content
+
+This site serves clean markdown to AI agents on request. Send an `Accept: text/markdown` header when fetching any page URL to receive a CommonMark version instead of HTML, at the same URL. No separate endpoint or path change is needed.
+
+This file and the markdown-negotiation behavior described above are provided by [MDF Analytics](https://github.com/bitcryptic-gw/mdf-analytics-wp), an implementation of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) open standard.

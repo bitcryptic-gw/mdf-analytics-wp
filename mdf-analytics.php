@@ -738,20 +738,182 @@ function mdf_maybe_show_backfill_notice(): void {
 add_action( 'admin_notices', 'mdf_maybe_show_backfill_notice' );
 
 // ---------------------------------------------------------------------------
+// llms.txt static-file detection notice
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-check the web root for a static llms.txt on admin page loads so the
+ * "detected" state stays current — it clears itself once the owner removes
+ * the file, and reappears if a file shows up later.
+ */
+function mdf_refresh_static_llms_txt_detection(): void {
+    if ( file_exists( ABSPATH . 'llms.txt' ) ) {
+        update_option( 'mdf_static_llms_txt_detected', true );
+    } else {
+        delete_option( 'mdf_static_llms_txt_detected' );
+        delete_option( 'mdf_static_llms_txt_notice_dismissed' );
+    }
+}
+add_action( 'admin_init', 'mdf_refresh_static_llms_txt_detection' );
+
+function mdf_maybe_show_static_llms_txt_notice(): void {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+
+    // Dismissal via query param.
+    if ( isset( $_GET['mdf_dismiss_static_llms'] ) && check_admin_referer( 'mdf_dismiss_static_llms' ) ) {
+        update_option( 'mdf_static_llms_txt_notice_dismissed', true );
+        return;
+    }
+
+    if ( ! get_option( 'mdf_static_llms_txt_detected', false ) ) return;
+    if ( get_option( 'mdf_static_llms_txt_notice_dismissed', false ) ) return;
+
+    $dismiss_url = add_query_arg( [
+        'mdf_dismiss_static_llms' => 1,
+        '_wpnonce'                => wp_create_nonce( 'mdf_dismiss_static_llms' ),
+    ] );
+
+    $snippet = mdf_markdown_negotiation_snippet();
+    ?>
+    <div class="notice notice-warning is-dismissible" data-dismiss-url="<?php echo esc_url( $dismiss_url ); ?>">
+        <p><strong>MDF Analytics: existing llms.txt detected</strong></p>
+        <p>Your site already has an <code>llms.txt</code> file at the web root, so MDF Analytics will not serve its own copy — your existing file takes priority automatically and nothing has been changed or overwritten.</p>
+        <p>If you'd like AI agents to know this site serves clean markdown on request, consider adding the snippet below to your existing <code>llms.txt</code>:</p>
+        <p>
+            <button type="button" class="button button-secondary" data-mdf-copy-snippet="<?php echo esc_attr( $snippet ); ?>">Copy snippet</button>
+        </p>
+        <pre style="max-width:720px; white-space:pre-wrap; background:#f6f7f7; border:1px solid #dcdcde; border-radius:4px; padding:8px 12px;"><code><?php echo esc_html( $snippet ); ?></code></pre>
+    </div>
+    <?php
+    mdf_enqueue_copy_snippet_script();
+}
+add_action( 'admin_notices', 'mdf_maybe_show_static_llms_txt_notice' );
+
+/**
+ * The machine-readable-content snippet offered for manual paste into an
+ * existing static llms.txt. Kept attribution-free — it lands in the site
+ * owner's own document.
+ */
+function mdf_markdown_negotiation_snippet(): string {
+    return "## Machine-readable content\n\nThis site serves clean markdown to AI agents on request. Send an `Accept: text/markdown` header when fetching any page URL to receive a CommonMark version instead of HTML, at the same URL. No separate endpoint or path change is needed.";
+}
+
+function mdf_enqueue_copy_snippet_script(): void {
+    $handle = 'mdf-copy-snippet';
+    if ( wp_script_is( $handle, 'enqueued' ) ) return;
+    wp_register_script( $handle, '', [], '1.0', true );
+    wp_enqueue_script( $handle );
+    wp_add_inline_script( $handle, mdf_copy_snippet_js(), 'after' );
+}
+
+function mdf_copy_snippet_js(): string {
+    return <<<'JS'
+(function(){
+    function fallbackCopy(text, done) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+    }
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-mdf-copy-snippet]');
+        if (!btn) return;
+        var text = btn.getAttribute('data-mdf-copy-snippet') || '';
+        var done = function() {
+            var orig = btn.innerHTML;
+            btn.innerHTML = 'Copied!';
+            setTimeout(function(){ btn.innerHTML = orig; }, 1600);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(done, function(){ fallbackCopy(text, done); });
+        } else {
+            fallbackCopy(text, done);
+        }
+    });
+})();
+JS;
+}
+
+// ---------------------------------------------------------------------------
 // Activation / deactivation
 // ---------------------------------------------------------------------------
 
 register_activation_hook( __FILE__, 'mdf_activate' );
 register_deactivation_hook( __FILE__, 'mdf_deactivate' );
+register_uninstall_hook( __FILE__, 'mdf_uninstall' );
 
 function mdf_activate(): void {
     mdf_create_table();
     mdf_schedule_purge();
     mdf_create_cache_dirs();
+
+    // If the site already has a static llms.txt in the web root, it shadows the
+    // plugin's virtual copy (the web server serves it before WordPress boots).
+    // Record that so an admin notice can offer the markdown-negotiation snippet
+    // — never read, modify, or delete that file.
+    if ( file_exists( ABSPATH . 'llms.txt' ) ) {
+        update_option( 'mdf_static_llms_txt_detected', true );
+    }
 }
 
 function mdf_deactivate(): void {
+    // Deactivation is a deliberate no-op for llms.txt and cache state.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
+}
+
+function mdf_uninstall(): void {
+    global $wpdb;
+
+    // Drop the analytics table.
+    $table = $wpdb->prefix . MDF_TABLE;
+    $wpdb->query( "DROP TABLE IF EXISTS {$table}" );
+
+    // Remove the generated markdown cache directory under wp-content/uploads.
+    mdf_remove_dir( mdf_cache_base_dir() );
+
+    // Remove all plugin options.
+    delete_option( 'mdf_db_version' );
+    delete_option( 'mdf_sat_rate' );
+    delete_option( 'mdf_usdc_rate' );
+    delete_option( 'mdf_use_currency' );
+    delete_option( 'mdf_offer_markdown' );
+    delete_option( 'mdf_backfill_queue' );
+    delete_option( 'mdf_backfill_total' );
+    delete_option( 'mdf_backfill_processed' );
+    delete_option( 'mdf_backfill_notice_dismissed' );
+    delete_option( 'mdf_cache_writable_error' );
+    delete_option( 'mdf_static_llms_txt_detected' );
+    delete_option( 'mdf_static_llms_txt_notice_dismissed' );
+
+    // Clear scheduled events.
+    wp_clear_scheduled_hook( 'mdf_purge_old_records' );
+    wp_clear_scheduled_hook( 'mdf_backfill_batch' );
+
+    // Deliberately NOT touching the web root: the plugin never writes there.
+}
+
+/**
+ * Recursively remove a directory tree (uninstall cleanup).
+ */
+function mdf_remove_dir( string $dir ): void {
+    if ( ! is_dir( $dir ) ) return;
+
+    $items = scandir( $dir );
+    foreach ( $items as $item ) {
+        if ( $item === '.' || $item === '..' ) continue;
+        $path = $dir . '/' . $item;
+        if ( is_dir( $path ) ) {
+            mdf_remove_dir( $path );
+        } else {
+            @unlink( $path );
+        }
+    }
+    @rmdir( $dir );
 }
 
 function mdf_create_table(): void {
