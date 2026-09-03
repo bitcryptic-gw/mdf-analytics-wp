@@ -5,6 +5,9 @@ All notable changes to MDF Analytics will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Note:** there is no v0.1.5 — the version number was skipped and never
+> tagged. The gap between 0.1.4 and 0.1.6 is deliberate, not a missing entry.
+
 ---
 
 ## [Unreleased]
@@ -55,8 +58,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   markdown-negotiation section), removing the previous default which
   contained the plugin author's personal profile content.
 
-### Fixed
-- N/A this release — see Added/Changed above.
+### Known limitation
+- The bundled `llms.txt` template lives inside the plugin directory, so
+  any site-owner customisation of it is overwritten when the plugin is
+  upgraded. Keep an external copy and re-apply after upgrading. A future
+  release should move the template content into a plugin option with an
+  in-admin editor so edits survive upgrades.
 
 ## [0.1.7] - 2026-07-16
 
@@ -115,7 +122,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - Vendored `league/html-to-markdown` (v5.1.1) with namespace scoping (`MdfAnalytics\Vendor\League\HTMLToMarkdown`) to eliminate class-redeclaration collisions if another plugin also vendors the same upstream library. No Composer required at runtime — the library is source-committed. Scoped via `humbug/php-scoper`, built by `build-vendor.sh`.
-- Pre-build markdown cache pipeline: all published posts are converted to CommonMark on save (via WP-Cron background job) and served to clients that send `Accept: text/markdown`. Markdown is never served for a URL until a pre-built `.md` file actually exists for it — no live-conversion fallback.
+- Pre-build markdown cache pipeline: all published posts are converted to CommonMark on save (via WP-Cron background job) and served to clients that send `Accept: text/markdown`. Markdown is never served for a URL until a pre-built `.md` file actually exists for it — no live-conversion fallback. **Markdown serving goes live in this release.**
 - Cache directory at `wp-content/uploads/mdf-cache/` with flat `posts/` layout, per-post `{post_id}.md` + `{post_id}.meta.json` sidecars, and a `manifest.json` aggregate.
 - Settings toggle "Offer markdown to agents" — enabling it auto-queues a full backfill of all published posts. Disabling stops markdown serving immediately.
 - `save_post` hook computes content hash (SHA-256 of `the_content()` post-filter output) and skips rebuilds when unchanged. Atomic temp-file + rename writes keep the old `.md` servable throughout a rebuild.
@@ -124,6 +131,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - Manifest read-modify-write race: `manifest.json` updates are now wrapped with `flock(LOCK_EX)`, preventing concurrent WP-Cron-driven writes (e.g. overlapping `mdf_markdown_rebuild` and `mdf_backfill_batch` events) from silently clobbering each other. The lock provides advisory exclusion around `mdf_manifest_record_result()` and the backfill-completion path; the existing atomic temp-file + rename is retained for reader safety.
+
+### Known limitation
+- Markdown is not served immediately after the toggle is enabled. The backfill must
+  complete before any URL will negotiate to markdown, since there is no live-conversion
+  fallback by design. On a small site this takes a few minutes; on a large one it takes
+  longer. Site owners who enable the toggle and immediately test with
+  `Accept: text/markdown` will see HTML and may conclude the feature is broken.
 
 ---
 
@@ -171,6 +185,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.9...HEAD
 [0.1.9]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.4...v0.1.6
 [0.1.4]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.1...v0.1.2
