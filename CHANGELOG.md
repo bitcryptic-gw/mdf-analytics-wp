@@ -12,6 +12,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-09-19
+
+### Added
+- In-admin **llms.txt editor** on the Settings page. The content is stored in
+  the database as a single `mdf_llms_txt` option (`{content, modified}`,
+  autoload off) and therefore survives plugin upgrades. The editor has a Save
+  button, a "Reset to default" button that deletes the option, a link to the
+  site's `/llms.txt`, and help text noting that served copies may be cached for
+  up to an hour. When a static web-root `llms.txt` is detected, the editor shows
+  the same shadowing warning as the existing admin notice (which is unchanged).
+- Input handling rejects invalid UTF-8 and content over 64 KiB with a clear
+  admin error (nothing is stored), strips NUL bytes, normalises CRLF to LF, and
+  deliberately does not strip tags so markdown autolinks such as
+  `<https://example.com>` survive. Saved values are displayed via
+  `esc_textarea`.
+
+### Changed
+- `/llms.txt` now serves the stored `mdf_llms_txt` content when non-empty, with
+  `Last-Modified` taken from the stored timestamp, and otherwise falls back to
+  the bundled `llms.txt` exactly as before (file mtime). The bundled file is now
+  the read-only **default template** only. GET/HEAD, `If-Modified-Since` → 304,
+  `Content-Length`, and the 1-hour public cache are preserved; responses now
+  also carry `X-Content-Type-Options: nosniff`.
+- **Action required for existing installations:** before upgrading, copy out any
+  customisations you made directly to the bundled
+  `wp-content/plugins/<plugin-dir>/llms.txt` file — this upgrade overwrites that
+  file one final time. After upgrading, paste your content into the new
+  Settings → llms.txt editor, which stores it in the database so future upgrades
+  leave it alone.
+
+### Removed
+- The README's instruction to customise llms.txt by editing the file inside the
+  plugin directory. That is no longer the supported path.
+
 ## [0.1.9] - 2026-09-01
 
 ### Fixed

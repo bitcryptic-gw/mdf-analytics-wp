@@ -3,7 +3,7 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
- * Version:     0.1.9
+ * Version:     0.1.10
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
@@ -16,10 +16,14 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.9' );
+define( 'MDF_VERSION',    '0.1.10' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
+
+// Hard cap for the owner-supplied llms.txt stored in the mdf_llms_txt option.
+// Anything larger is rejected outright rather than silently truncated.
+define( 'MDF_LLMS_TXT_MAX_BYTES', 65536 );
 
 // ---------------------------------------------------------------------------
 // Known agent User-Agent substrings (case-insensitive)
@@ -935,6 +939,7 @@ function mdf_uninstall(): void {
     delete_option( 'mdf_cache_writable_error' );
     delete_option( 'mdf_static_llms_txt_detected' );
     delete_option( 'mdf_static_llms_txt_notice_dismissed' );
+    delete_option( 'mdf_llms_txt' );
 
     // Clear scheduled events.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
@@ -1165,6 +1170,99 @@ function mdf_ua_first_token( string $ua ): string {
 
 add_action( 'init', 'mdf_serve_llms_txt' );
 
+/**
+ * Read the owner-supplied llms.txt option.
+ *
+ * Stored as a single option so the content and its timestamp can never get out
+ * of step. Returns a normalised array whether or not the option exists.
+ *
+ * @return array{content:string,modified:int}
+ */
+function mdf_get_llms_txt_option(): array {
+    $opt = get_option( 'mdf_llms_txt', [] );
+
+    if ( ! is_array( $opt ) ) {
+        return [ 'content' => '', 'modified' => 0 ];
+    }
+
+    return [
+        'content'  => ( isset( $opt['content'] ) && is_string( $opt['content'] ) ) ? $opt['content'] : '',
+        'modified' => isset( $opt['modified'] ) ? (int) $opt['modified'] : 0,
+    ];
+}
+
+/**
+ * Resolve the content that should actually be served.
+ *
+ * Custom option content wins when non-empty; otherwise the bundled file is the
+ * read-only default template. The bundled file is never written to.
+ *
+ * @return array{content:string,modified:int,custom:bool}
+ */
+function mdf_get_effective_llms_txt(): array {
+    $opt = mdf_get_llms_txt_option();
+
+    if ( $opt['content'] !== '' ) {
+        return [
+            'content'  => $opt['content'],
+            'modified' => $opt['modified'] > 0 ? $opt['modified'] : time(),
+            'custom'   => true,
+        ];
+    }
+
+    $file = plugin_dir_path( __FILE__ ) . 'llms.txt';
+    if ( file_exists( $file ) && is_readable( $file ) ) {
+        $mtime = filemtime( $file );
+        return [
+            'content'  => (string) file_get_contents( $file ),
+            'modified' => $mtime ?: time(),
+            'custom'   => false,
+        ];
+    }
+
+    return [ 'content' => '', 'modified' => 0, 'custom' => false ];
+}
+
+/**
+ * Normalise owner-supplied llms.txt input.
+ *
+ * Deliberately not sanitize_textarea_field(): markdown legitimately contains
+ * angle-bracket autolinks such as <https://example.com>, which tag stripping
+ * would destroy. Invalid UTF-8 is rejected rather than silently mangled.
+ *
+ * @return array{ok:bool,content:string,error:string}
+ */
+function mdf_sanitize_llms_txt_input( string $raw ): array {
+    // wp_check_invalid_utf8() returns '' for a non-empty, invalid input when
+    // stripping is disabled — WordPress's own UTF-8 gate, no mbstring needed.
+    $checked = wp_check_invalid_utf8( $raw, false );
+    if ( $raw !== '' && $checked === '' ) {
+        return [
+            'ok'      => false,
+            'content' => '',
+            'error'   => 'The llms.txt content is not valid UTF-8 and was not saved.',
+        ];
+    }
+
+    // Strip NUL bytes, then normalise line endings to LF.
+    $raw = str_replace( "\0", '', $raw );
+    $raw = str_replace( [ "\r\n", "\r" ], "\n", $raw );
+
+    if ( strlen( $raw ) > MDF_LLMS_TXT_MAX_BYTES ) {
+        return [
+            'ok'      => false,
+            'content' => '',
+            'error'   => sprintf(
+                'The llms.txt content is %d bytes, over the %d-byte limit, and was not saved.',
+                strlen( $raw ),
+                MDF_LLMS_TXT_MAX_BYTES
+            ),
+        ];
+    }
+
+    return [ 'ok' => true, 'content' => $raw, 'error' => '' ];
+}
+
 function mdf_serve_llms_txt(): void {
     $uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
     $path = wp_parse_url( $uri, PHP_URL_PATH );
@@ -1178,15 +1276,16 @@ function mdf_serve_llms_txt(): void {
         return;
     }
 
-    $file = plugin_dir_path( __FILE__ ) . 'llms.txt';
+    $effective = mdf_get_effective_llms_txt();
 
-    if ( ! file_exists( $file ) || ! is_readable( $file ) ) {
+    if ( $effective['content'] === '' ) {
         return;
     }
 
-    $mtime  = filemtime( $file );
-    $size   = filesize( $file );
-    $if_mod = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
+    $content = $effective['content'];
+    $mtime   = $effective['modified'];
+    $size    = strlen( $content );
+    $if_mod  = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
 
     if ( $if_mod !== '' ) {
         $if_mod_time = strtotime( $if_mod );
@@ -1200,6 +1299,7 @@ function mdf_serve_llms_txt(): void {
     status_header( 200 );
     header( 'Content-Type: text/plain; charset=utf-8' );
     header( 'Content-Length: ' . $size );
+    header( 'X-Content-Type-Options: nosniff' );
     header( 'Last-Modified: ' . gmdate( 'D, d M Y H:i:s', $mtime ) . ' GMT' );
     header( 'Cache-Control: public, max-age=3600' );
 
@@ -1207,7 +1307,7 @@ function mdf_serve_llms_txt(): void {
         exit;
     }
 
-    readfile( $file );
+    echo $content;
     exit;
 }
 
@@ -1265,6 +1365,22 @@ function mdf_render_settings(): void {
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
     }
 
+    $llms_notice = '';
+    if ( isset( $_POST['mdf_llms_txt_save'] ) && check_admin_referer( 'mdf_llms_txt_save' ) ) {
+        $raw    = isset( $_POST['mdf_llms_txt_content'] ) ? wp_unslash( (string) $_POST['mdf_llms_txt_content'] ) : '';
+        $result = mdf_sanitize_llms_txt_input( $raw );
+
+        if ( $result['ok'] ) {
+            update_option( 'mdf_llms_txt', [ 'content' => $result['content'], 'modified' => time() ], false );
+            $llms_notice = '<div class="notice notice-success"><p>llms.txt saved.</p></div>';
+        } else {
+            $llms_notice = '<div class="notice notice-error"><p><strong>MDF Analytics:</strong> ' . esc_html( $result['error'] ) . '</p></div>';
+        }
+    } elseif ( isset( $_POST['mdf_llms_txt_reset'] ) && check_admin_referer( 'mdf_llms_txt_save' ) ) {
+        delete_option( 'mdf_llms_txt' );
+        $llms_notice = '<div class="notice notice-success"><p>llms.txt reset to the bundled default.</p></div>';
+    }
+
     $posts_dir = mdf_cache_posts_dir();
     if ( is_dir( $posts_dir ) && is_writable( $posts_dir ) ) {
         delete_option( 'mdf_cache_writable_error' );
@@ -1278,6 +1394,11 @@ function mdf_render_settings(): void {
     $usdc_rate      = (float)  get_option( 'mdf_usdc_rate',      0.001 );
     $use_currency   =          get_option( 'mdf_use_currency',   'sats' );
     $offer_markdown = (bool)   get_option( 'mdf_offer_markdown', false );
+
+    $llms_option    = mdf_get_llms_txt_option();
+    $llms_effective = mdf_get_effective_llms_txt();
+    $llms_value     = $llms_effective['content'];
+    $llms_custom    = $llms_option['content'] !== '';
     ?>
     <div class="wrap">
         <h1>MDF Analytics — Settings</h1>
@@ -1344,6 +1465,32 @@ function mdf_render_settings(): void {
                 </tr>
             </table>
             <p class="submit"><input type="submit" name="mdf_save_settings" class="button button-primary" value="Save Settings"></p>
+        </form>
+        <hr>
+        <h2>llms.txt</h2>
+        <?php echo $llms_notice; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built above from escaped fragments. ?>
+        <?php if ( get_option( 'mdf_static_llms_txt_detected', false ) ) : ?>
+            <div class="notice notice-warning inline">
+                <p><strong>A static llms.txt exists in your web root.</strong> The web server serves that file before WordPress runs, so it takes priority over anything shown here — the content in this editor will not be served until that file is removed.</p>
+            </div>
+        <?php endif; ?>
+        <form method="post">
+            <?php wp_nonce_field( 'mdf_llms_txt_save' ); ?>
+            <p>This is the content served at <a href="<?php echo esc_url( home_url( '/llms.txt' ) ); ?>" target="_blank" rel="noopener noreferrer"><code><?php echo esc_html( home_url( '/llms.txt' ) ); ?></code></a>.
+            It starts as the bundled default template; saving your own content stores it in the database so plugin upgrades no longer overwrite it.</p>
+            <textarea name="mdf_llms_txt_content" id="mdf_llms_txt_content" rows="16" class="large-text code" spellcheck="false"><?php echo esc_textarea( $llms_value ); ?></textarea>
+            <p class="description">
+                <?php if ( $llms_custom ) : ?>
+                    Currently serving your saved custom content.
+                <?php else : ?>
+                    Currently serving the bundled default template.
+                <?php endif; ?>
+                Served copies may be cached by browsers and proxies for up to an hour, so changes can take a moment to appear. "Reset to default" removes your saved content and restores the bundled template.
+            </p>
+            <p class="submit">
+                <input type="submit" name="mdf_llms_txt_save" class="button button-primary" value="Save llms.txt">
+                <input type="submit" name="mdf_llms_txt_reset" class="button" value="Reset to default" onclick="return confirm('Discard your custom llms.txt and restore the bundled default?');">
+            </p>
         </form>
         <hr>
         <h2>About MDF Analytics</h2>

@@ -38,7 +38,7 @@ The plugin is **multi-file** as of v0.1.4 — it ships a vendored, namespaced co
 
 ### Recommended: install from a packaged release
 
-1. Go to the [Releases page](https://github.com/bitcryptic-gw/mdf-analytics-wp/releases) and download the release asset for the version you want (e.g. `mdf-analytics-0.1.9.zip`). **Download the named release asset, not the auto-generated "Source code (zip)" link.**
+1. Go to the [Releases page](https://github.com/bitcryptic-gw/mdf-analytics-wp/releases) and download the release asset for the version you want (e.g. `mdf-analytics-0.1.10.zip`). **Download the named release asset, not the auto-generated "Source code (zip)" link.**
 2. In your WordPress admin, go to **Plugins → Add New → Upload Plugin**.
 3. Upload the zip and click **Activate**.
 4. Find **MDF Analytics** in the left admin menu.
@@ -81,19 +81,22 @@ Configure your preferred currency (sats via Lightning or USDC via Base) and the 
 
 This is also where you enable **"Offer markdown to agents"** — the toggle that turns on markdown serving for requests sending `Accept: text/markdown`. When enabled, a coverage status line below the toggle reports backfill progress while it runs, and cached-vs-published counts once it completes.
 
+The same page also has an **llms.txt editor** (as of v0.1.10) — see [llms.txt serving](#llmstxt-serving) below.
+
 ### llms.txt serving
 
-The plugin ships a generic, owner-editable `llms.txt` template in the plugin directory and serves it virtually at the site root (`/llms.txt`) — nothing is ever written to your WordPress installation's actual root directory.
+The plugin ships a generic `llms.txt` template in the plugin directory, used as the **default template**, and serves it virtually at the site root (`/llms.txt`) — nothing is ever written to your WordPress installation's actual root directory.
 
-**To customise it, edit the template file inside the plugin directory** (`wp-content/plugins/<plugin-dir>/llms.txt`, where `<plugin-dir>` depends on how you installed — see Installation above). There is no in-admin editor for this file. Edit the placeholder sections (site summary, key pages) to describe your own site; the "Machine-readable content" section at the bottom, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing. Changes are picked up immediately by the virtual handler.
+**To customise it, use the "llms.txt" editor on the plugin's Settings page** (as of v0.1.10). The editor is prefilled with the current effective content — your saved custom content if you have any, otherwise the bundled default template. Saving stores your content in the database, so it survives plugin upgrades; a "Reset to default" button discards your saved content and reverts to the bundled template. The "Machine-readable content" section at the bottom of the template, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing. Changes are picked up immediately by the virtual handler, though served copies may be cached by browsers and proxies for up to an hour.
 
-**If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The plugin never reads, edits, or deletes your existing file.
+The bundled file in the plugin directory is the read-only default template. Editing it directly is no longer the supported path and **those edits are overwritten when you upgrade the plugin** — copy any customisation you made to the bundled file before upgrading to v0.1.10, then paste it into the editor.
+
+**If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy — default or saved — is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The same warning appears inside the llms.txt editor. The plugin never reads, edits, or deletes your existing file.
 
 Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
 
-**On uninstall** (not deactivation — deactivating leaves everything in place), the plugin removes its own data: the database table, all generated markdown cache files, and its options. It never touches a web-root `llms.txt`, static or otherwise, since it never created one.
+**On uninstall** (not deactivation — deactivating leaves everything in place), the plugin removes its own data: the database table, all generated markdown cache files, and its options (including any saved llms.txt content). It never touches a web-root `llms.txt`, static or otherwise, since it never created one.
 
-> Because customisations live in the plugin directory, they are **overwritten when you upgrade the plugin**. Keep a copy of your edited `llms.txt` outside the plugin directory and re-apply it after upgrading, until an in-admin editor ships.
 
 ---
 
@@ -107,7 +110,6 @@ Conversion is handled by the vendored `league/html-to-markdown` library.
 
 - **WP Super Cache — reverse race condition.** As of v0.1.7, the plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction is not yet fixed: if WPSC caches the **HTML** response for a URL first, markdown requests to that same URL can be blocked from ever reaching an agent, because WPSC's `wpsc_get_accept_header()` maps `text/markdown` to `text/html` internally and treats them as the same cache entry. Fixing this fully requires a change in WP Super Cache's own plugin extension directory, not just this plugin. If you run WP Super Cache, be aware the dashboard's "wanted markdown" figures may undercount on cached URLs.
 - **HTML entity decoding.** Standard HTML entities (e.g. `&amp;`) are currently preserved as-is in converted markdown rather than decoded, so agents may see `&amp;` where a human reader would see `&`. This doesn't break parsing but is cosmetically imperfect.
-- **No in-admin `llms.txt` editor.** Customising the discovery file requires editing it inside the plugin directory, and those edits do not survive a plugin upgrade.
 
 ---
 
@@ -149,6 +151,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.10 | 2026-09-19 | Added: in-admin llms.txt editor on the Settings page — content is stored in the database (option `mdf_llms_txt`) and survives plugin upgrades; the bundled file becomes the read-only default template; a static-webroot warning is shown in the editor. Changed: `/llms.txt` now serves the stored option when set, falling back to the bundled default otherwise. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.9 | 2026-09-01 | Fix: backfill and per-post rebuild recovery when the scheduled cron event is lost to a race with another scheduler — scheduling is now verified and retried, with a self-heal recheck on existing crons and admin page loads. Added: persistent markdown-coverage status line on the Settings page. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.8 | 2026-09-01 | Added: uninstall hook removes the DB table, markdown cache directory, plugin options, and scheduled events. Added: activation-time detection + dismissible admin notice for a pre-existing static `/llms.txt`, with a copy-paste "Machine-readable content" snippet. Changed: bundled `llms.txt` replaced with a generic owner-editable template. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.7 | 2026-07-16 | Fix: `DONOTCACHEPAGE` set before serving markdown, preventing WP Super Cache from sharing a cache key between markdown and HTML responses for the same URL. Fix: page-builder shortcode expansion (e.g. Divi) now works correctly in WP-Cron context. See [CHANGELOG.md](CHANGELOG.md). |
