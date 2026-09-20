@@ -26,6 +26,9 @@ define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
 // early cache phase and survives WP Super Cache upgrades.
 define( 'MDF_WPSC_ADAPTER_FILE', 'mdf-supercache-adapter.php' );
 
+// README anchor for the adapter + negotiation-status documentation.
+define( 'MDF_NEGOTIATION_README_URL', 'https://github.com/bitcryptic-gw/mdf-analytics-wp#wp-super-cache-adapter' );
+
 // Hard cap for the owner-supplied llms.txt stored in the mdf_llms_txt option.
 // Anything larger is rejected outright rather than silently truncated.
 define( 'MDF_LLMS_TXT_MAX_BYTES', 65536 );
@@ -69,6 +72,8 @@ define( 'MDF_KNOWN_AGENTS', serialize( [
 define( 'MDF_INTERNAL_AGENTS', serialize( [
     // WordPress platform self-calls
     'wordpress/',
+    // MDF Analytics' own negotiation self-test loopback
+    'mdf-analytics-selftest',
     // Uptime & health monitors
     'uptime-kuma', 'uptimerobot', 'statuscake', 'pingdom',
     'hetrixtools', 'freshping', 'betterstack', 'hyperping',
@@ -689,6 +694,207 @@ function mdf_maybe_serve_markdown(): void {
 add_action( 'template_redirect', 'mdf_maybe_serve_markdown', 5 );
 
 // ---------------------------------------------------------------------------
+// Negotiation self-test — does markdown actually reach clients?
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the stored negotiation self-test result.
+ *
+ * The status is one of:
+ *   - working: a plain-URL loopback request received `text/markdown`.
+ *   - blocked: a plain-URL loopback request returned `text/html`, meaning
+ *              something in front of WordPress is serving a cached page.
+ *   - unknown: the request failed, timed out, was refused, or returned a
+ *              non-200. Loopback requests are blocked on plenty of hosts, so
+ *              this is a normal outcome and is never reported as blocked.
+ *
+ * @return array{status:string,checked:int,detail:string}
+ */
+function mdf_get_negotiation_status(): array {
+    $stored = get_option( 'mdf_negotiation_status', [] );
+
+    if ( ! is_array( $stored ) ) {
+        $stored = [];
+    }
+
+    $status = isset( $stored['status'] ) ? (string) $stored['status'] : '';
+    if ( ! in_array( $status, [ 'working', 'blocked', 'unknown' ], true ) ) {
+        $status = 'unknown';
+    }
+
+    return [
+        'status'  => $status,
+        'checked' => isset( $stored['checked'] ) ? (int) $stored['checked'] : 0,
+        'detail'  => isset( $stored['detail'] ) ? (string) $stored['detail'] : '',
+    ];
+}
+
+/**
+ * Whether the last self-test result was "blocked".
+ */
+function mdf_negotiation_is_blocked(): bool {
+    $status = mdf_get_negotiation_status();
+    return $status['status'] === 'blocked';
+}
+
+/**
+ * Pick a plain, public URL on this site that has a cached .md file.
+ *
+ * The URL is deliberately the site's own permalink with no added query string,
+ * so the loopback follows the same path a real agent would — including any
+ * page cache in front of WordPress.
+ */
+function mdf_negotiation_test_url(): string {
+    $ids = mdf_list_cached_post_ids();
+    sort( $ids, SORT_NUMERIC );
+
+    foreach ( $ids as $id ) {
+        $post = get_post( (int) $id );
+        if ( ! $post instanceof \WP_Post || $post->post_status !== 'publish' ) {
+            continue;
+        }
+        $permalink = get_permalink( $post );
+        if ( is_string( $permalink ) && $permalink !== '' ) {
+            return $permalink;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * Perform the negotiation self-test, retrying once if a plain-URL request
+ * comes back as HTML while the WP Super Cache adapter is registered.
+ *
+ * The retry exists because registering the adapter rewrites WP Super Cache's
+ * config file; a worker holding a stale compiled copy of that config can serve
+ * one more cached HTML page immediately after registration. A single delayed
+ * retry stops the self-test from reporting "blocked" during that brief window.
+ * A genuinely blocked site (another cache, or a cache the adapter cannot help
+ * with) stays blocked on the retry and is reported honestly.
+ *
+ * @return array{status:string,checked:int,detail:string}
+ */
+function mdf_perform_negotiation_self_test(): array {
+    $checked = time();
+
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return [
+            'status'  => 'unknown',
+            'checked' => $checked,
+            'detail'  => 'Markdown offering is disabled.',
+        ];
+    }
+
+    $url = mdf_negotiation_test_url();
+    if ( $url === '' ) {
+        return [
+            'status'  => 'unknown',
+            'checked' => $checked,
+            'detail'  => 'No cached markdown content is available to test yet.',
+        ];
+    }
+
+    $args = [
+        'timeout'     => 5,
+        'redirection' => 0,
+        'headers'     => [ 'Accept' => 'text/markdown' ],
+        'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
+    ];
+
+    $max_attempts = 2;
+
+    for ( $attempt = 1; $attempt <= $max_attempts; $attempt++ ) {
+        $response = wp_remote_get( $url, $args );
+
+        if ( is_wp_error( $response ) ) {
+            return [
+                'status'  => 'unknown',
+                'checked' => $checked,
+                'detail'  => 'Self-test request failed: ' . $response->get_error_code() . '.',
+            ];
+        }
+
+        $code  = (int) wp_remote_retrieve_response_code( $response );
+        $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
+
+        if ( $code === 200 && strpos( $ctype, 'text/markdown' ) !== false ) {
+            return [
+                'status'  => 'working',
+                'checked' => $checked,
+                'detail'  => 'Plain-URL request returned ' . $ctype . '.',
+            ];
+        }
+
+        if ( $code === 200 && strpos( $ctype, 'text/html' ) !== false ) {
+            // Give a just-registered adapter a moment to propagate, then retry
+            // once before concluding the site is genuinely blocked.
+            if ( $attempt < $max_attempts && mdf_wpsc_adapter_registered() ) {
+                if ( function_exists( 'opcache_invalidate' ) ) {
+                    // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+                    @opcache_invalidate( WP_CONTENT_DIR . '/wp-cache-config.php', true );
+                }
+                usleep( 2000000 );
+                continue;
+            }
+
+            return [
+                'status'  => 'blocked',
+                'checked' => $checked,
+                'detail'  => 'Plain-URL request returned ' . $ctype . ' instead of markdown.',
+            ];
+        }
+
+        return [
+            'status'  => 'unknown',
+            'checked' => $checked,
+            'detail'  => sprintf(
+                'Unexpected self-test response (HTTP %d%s).',
+                $code,
+                $ctype !== '' ? ', ' . $ctype : ''
+            ),
+        ];
+    }
+
+    return [
+        'status'  => 'unknown',
+        'checked' => $checked,
+        'detail'  => 'Self-test did not produce a result.',
+    ];
+}
+
+/**
+ * Run the self-test and store the result in `mdf_negotiation_status`
+ * (autoload off). Never runs recursively.
+ *
+ * @return array{status:string,checked:int,detail:string}
+ */
+function mdf_run_negotiation_self_test(): array {
+    static $running = false;
+
+    if ( $running ) {
+        return mdf_get_negotiation_status();
+    }
+
+    $running = true;
+    $result  = mdf_perform_negotiation_self_test();
+    update_option( 'mdf_negotiation_status', $result, false );
+    $running = false;
+
+    return $result;
+}
+add_action( 'mdf_negotiation_self_test', 'mdf_run_negotiation_self_test' );
+
+/**
+ * Ensure the daily self-test cron event is scheduled.
+ */
+function mdf_schedule_negotiation_self_test(): void {
+    if ( ! wp_next_scheduled( 'mdf_negotiation_self_test' ) ) {
+        wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'mdf_negotiation_self_test' );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bundled WP Super Cache adapter
 //
 // WP Super Cache folds every non-JSON Accept value into text/html and uses
@@ -978,7 +1184,11 @@ function mdf_maybe_show_static_llms_txt_notice(): void {
     <div class="notice notice-warning is-dismissible" data-dismiss-url="<?php echo esc_url( $dismiss_url ); ?>">
         <p><strong>MDF Analytics: existing llms.txt detected</strong></p>
         <p>Your site already has an <code>llms.txt</code> file at the web root, so MDF Analytics will not serve its own copy — your existing file takes priority automatically and nothing has been changed or overwritten.</p>
-        <p>If you'd like AI agents to know this site serves clean markdown on request, consider adding the snippet below to your existing <code>llms.txt</code>:</p>
+        <?php if ( mdf_negotiation_is_blocked() ) : ?>
+            <p><strong>Warning:</strong> the negotiation self-test currently reports that this site is <em>blocked</em> — a page cache is serving HTML to plain-URL requests even when they ask for markdown. The snippet below would describe behaviour agents are not actually getting on those URLs. Fix the cache first (see Settings → Offer markdown to agents), then re-test.</p>
+        <?php else : ?>
+            <p>If you'd like AI agents to know this site serves clean markdown on request, consider adding the snippet below to your existing <code>llms.txt</code>:</p>
+        <?php endif; ?>
         <p>
             <button type="button" class="button button-secondary" data-mdf-copy-snippet="<?php echo esc_attr( $snippet ); ?>">Copy snippet</button>
         </p>
@@ -1051,11 +1261,16 @@ function mdf_activate(): void {
     mdf_create_table();
     mdf_schedule_purge();
     mdf_create_cache_dirs();
+    mdf_schedule_negotiation_self_test();
 
     // Register the WP Super Cache adapter when markdown offering is already on
     // (e.g. reactivation after an update). The admin-load self-heal handles the
     // upgrade path, where the activation hook does not run.
     mdf_maybe_register_wpsc_adapter();
+
+    // Record an initial negotiation status. Bounded by the self-test timeout
+    // and never fatal on failure.
+    mdf_run_negotiation_self_test();
 
     // If the site already has a static llms.txt in the web root, it shadows the
     // plugin's virtual copy (the web server serves it before WordPress boots).
@@ -1069,6 +1284,7 @@ function mdf_activate(): void {
 function mdf_deactivate(): void {
     // Deactivation is a deliberate no-op for llms.txt and cache state.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
+    wp_clear_scheduled_hook( 'mdf_negotiation_self_test' );
 
     // Remove the WP Super Cache adapter registration so a deactivated plugin
     // has no effect on caching.
@@ -1099,10 +1315,12 @@ function mdf_uninstall(): void {
     delete_option( 'mdf_static_llms_txt_detected' );
     delete_option( 'mdf_static_llms_txt_notice_dismissed' );
     delete_option( 'mdf_llms_txt' );
+    delete_option( 'mdf_negotiation_status' );
 
     // Clear scheduled events.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
     wp_clear_scheduled_hook( 'mdf_backfill_batch' );
+    wp_clear_scheduled_hook( 'mdf_negotiation_self_test' );
 
     // Remove the WP Super Cache adapter registration.
     mdf_maybe_unregister_wpsc_adapter();
@@ -1425,6 +1643,50 @@ function mdf_sanitize_llms_txt_input( string $raw ): array {
     return [ 'ok' => true, 'content' => $raw, 'error' => '' ];
 }
 
+/**
+ * Replace the bundled template's "Machine-readable content" section with a
+ * neutral, attribution-only "About this file" section.
+ *
+ * Only ever applied to the bundled default template, only when the
+ * self-test reports blocked, and never to content the owner saved in the
+ * editor. If the heading is not found the content is returned unchanged so an
+ * unrecognised template is never mangled.
+ */
+function mdf_llms_txt_without_negotiation_claim( string $content ): string {
+    $heading = '## Machine-readable content';
+    $pos     = strpos( $content, $heading );
+
+    if ( $pos === false ) {
+        return $content;
+    }
+
+    $neutral = "## About this file\n\n"
+        . 'This file is provided by [MDF Analytics](https://github.com/bitcryptic-gw/mdf-analytics-wp), '
+        . 'an implementation of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) open standard.';
+
+    return rtrim( substr( $content, 0, $pos ) ) . "\n\n" . $neutral . "\n";
+}
+
+/**
+ * Resolve the llms.txt content to actually serve.
+ *
+ * Custom owner content is always served verbatim. The bundled default is
+ * served unchanged unless the negotiation self-test reports blocked, in which
+ * case its markdown-negotiation claim is removed (it would be false for
+ * plain-URL requests on this site).
+ *
+ * @return array{content:string,modified:int,custom:bool}
+ */
+function mdf_get_servable_llms_txt(): array {
+    $effective = mdf_get_effective_llms_txt();
+
+    if ( ! $effective['custom'] && mdf_negotiation_is_blocked() ) {
+        $effective['content'] = mdf_llms_txt_without_negotiation_claim( $effective['content'] );
+    }
+
+    return $effective;
+}
+
 function mdf_serve_llms_txt(): void {
     $uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
     $path = wp_parse_url( $uri, PHP_URL_PATH );
@@ -1438,7 +1700,7 @@ function mdf_serve_llms_txt(): void {
         return;
     }
 
-    $effective = mdf_get_effective_llms_txt();
+    $effective = mdf_get_servable_llms_txt();
 
     if ( $effective['content'] === '' ) {
         return;
@@ -1499,6 +1761,79 @@ function mdf_register_menu(): void {
     );
 }
 
+/**
+ * Render the negotiation self-test status next to the markdown toggle.
+ */
+function mdf_render_negotiation_status_block(): void {
+    $status      = mdf_get_negotiation_status();
+    $wpsc_active = mdf_wpsc_active();
+    $mod_rewrite = mdf_wpsc_mod_rewrite_mode();
+    $adapter     = $wpsc_active && mdf_wpsc_adapter_registered();
+
+    $labels = [
+        'working' => [ '#1e7e34', 'Working' ],
+        'blocked' => [ '#b32d2e', 'Blocked' ],
+        'unknown' => [ '#646970', 'Not verified' ],
+    ];
+    [ $color, $label ] = $labels[ $status['status'] ];
+
+    $link = '<a href="' . esc_url( MDF_NEGOTIATION_README_URL ) . '" target="_blank" rel="noopener noreferrer">README</a>';
+    ?>
+    <div style="margin-top:10px; padding:10px 12px; background:#fff; border:1px solid #dcdcde; border-left:4px solid <?php echo esc_attr( $color ); ?>; border-radius:3px;">
+        <p style="margin:0 0 4px;"><strong style="color:<?php echo esc_attr( $color ); ?>;">Negotiation self-test: <?php echo esc_html( $label ); ?></strong></p>
+        <p style="margin:0;">
+        <?php
+        switch ( $status['status'] ) {
+            case 'working':
+                echo 'Plain-URL requests with <code>Accept: text/markdown</code> receive markdown.';
+                break;
+
+            case 'blocked':
+                echo 'A page cache is serving HTML to agents. Requests to a plain URL (no query string) are answered with cached HTML even when they ask for markdown, so agents are told to expect something the site does not deliver. ';
+                if ( $wpsc_active && $mod_rewrite === true ) {
+                    echo 'WP Super Cache is in <strong>Expert (mod_rewrite) mode</strong>: Apache serves cached pages before PHP runs, so the bundled adapter cannot help. Add the <code>RewriteCond</code> shown in the ' . $link . ' to your <code>.htaccess</code> supercache rules.';
+                } elseif ( $wpsc_active && $adapter ) {
+                    echo 'WP Super Cache is active and the MDF adapter is registered, but the plain URL still returned HTML — clear the WP Super Cache cache and re-test, and check for another cache or CDN in front of the site. See the ' . $link . '.';
+                } elseif ( $wpsc_active ) {
+                    echo 'WP Super Cache is active but the MDF adapter is not registered. Toggle "Offer markdown to agents" off and on to register it. See the ' . $link . '.';
+                } else {
+                    echo 'A page cache or CDN in front of WordPress is serving cached HTML. See the ' . $link . '.';
+                }
+                break;
+
+            default:
+                echo 'The self-test could not confirm the result (the loopback request failed, timed out, or returned a non-200). This is normal on many hosts and is not treated as blocked.';
+                break;
+        }
+        ?>
+        </p>
+        <?php if ( $status['checked'] > 0 ) : ?>
+            <p class="description" style="margin:6px 0 0;">
+                Last checked <?php echo esc_html( wp_date( 'Y-m-d H:i:s', $status['checked'] ) ); ?><?php echo $status['detail'] !== '' ? ' — ' . esc_html( $status['detail'] ) : ''; ?>
+            </p>
+        <?php endif; ?>
+        <?php if ( $wpsc_active ) : ?>
+            <?php
+            if ( $mod_rewrite === true ) {
+                $mode_label = 'Expert (mod_rewrite) mode';
+            } elseif ( $mod_rewrite === false ) {
+                $mode_label = 'standard mode';
+            } else {
+                $mode_label = 'mode unknown';
+            }
+            ?>
+            <p class="description" style="margin:4px 0 0;">
+                WP Super Cache: <code><?php echo esc_html( $mode_label ); ?></code>; MDF adapter <?php echo $adapter ? 'registered' : 'not registered'; ?>.
+            </p>
+        <?php endif; ?>
+        <?php if ( $status['status'] === 'blocked' && mdf_get_llms_txt_option()['content'] !== '' ) : ?>
+            <p class="description" style="margin:4px 0 0;">Your saved llms.txt is served verbatim, so its "Machine-readable content" section may still claim markdown serving. Review it below.</p>
+        <?php endif; ?>
+        <p style="margin:8px 0 0;"><input type="submit" name="mdf_negotiation_retest" class="button button-secondary" value="Re-test now"></p>
+    </div>
+    <?php
+}
+
 function mdf_render_settings(): void {
     if ( ! current_user_can( 'manage_options' ) ) return;
 
@@ -1518,6 +1853,7 @@ function mdf_render_settings(): void {
             update_option( 'mdf_backfill_notice_dismissed', false );
             mdf_start_backfill();
             mdf_maybe_register_wpsc_adapter();
+            mdf_run_negotiation_self_test();
             echo '<div class="notice notice-info"><p><strong>MDF Analytics:</strong> Markdown offering enabled. Building markdown versions of all published posts — agents will be offered markdown as each post finishes. <a href="' . esc_url( admin_url( 'admin.php?page=mdf-analytics' ) ) . '">View dashboard →</a></p></div>';
         } elseif ( $old_offer && ! $new_offer ) {
             // Toggle flipped off: clear the backfill queue and stop affecting
@@ -1526,9 +1862,20 @@ function mdf_render_settings(): void {
             update_option( 'mdf_backfill_total', null );
             update_option( 'mdf_backfill_processed', 0 );
             mdf_maybe_unregister_wpsc_adapter();
+            // Reflect that negotiation is no longer offered rather than leaving
+            // a stale blocked/working result in place.
+            mdf_run_negotiation_self_test();
         }
 
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
+    }
+
+    // The re-test button lives inside the settings form (no nested form), so it
+    // shares that form's nonce. Clicking it does not save the other fields
+    // because the save handler requires mdf_save_settings.
+    if ( isset( $_POST['mdf_negotiation_retest'] ) && check_admin_referer( 'mdf_settings_save' ) ) {
+        mdf_run_negotiation_self_test();
+        echo '<div class="notice notice-success"><p>MDF Analytics: negotiation self-test complete.</p></div>';
     }
 
     $llms_notice = '';
@@ -1626,6 +1973,9 @@ function mdf_render_settings(): void {
                                     ?>
                                 </p>
                             <?php endif; ?>
+                        <?php endif; ?>
+                        <?php if ( $offer_markdown ) : ?>
+                            <?php mdf_render_negotiation_status_block(); ?>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -1902,6 +2252,7 @@ function mdf_maybe_upgrade_db(): void {
     if ( get_option( 'mdf_db_version' ) !== MDF_VERSION ) {
         mdf_create_table();
         mdf_schedule_purge();
+        mdf_schedule_negotiation_self_test();
         mdf_maybe_register_wpsc_adapter();
     }
 }

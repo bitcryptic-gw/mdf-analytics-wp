@@ -81,6 +81,8 @@ Configure your preferred currency (sats via Lightning or USDC via Base) and the 
 
 This is also where you enable **"Offer markdown to agents"** — the toggle that turns on markdown serving for requests sending `Accept: text/markdown`. When enabled, a coverage status line below the toggle reports backfill progress while it runs, and cached-vs-published counts once it completes.
 
+Below that, a **negotiation self-test** status tells you whether markdown actually reaches clients. A loopback request is sent to a plain-URL page with a cached markdown version, asking for `Accept: text/markdown`, and the response type is recorded. There are three outcomes: **working** (markdown returned), **blocked** (the request came back as HTML — a page cache in front of WordPress is serving a cached page to agents), and **not verified / unknown** (the loopback failed, timed out, or returned a non-200 — normal on many hosts, and never reported as blocked). The test runs on activation, when the toggle is switched on, once a day, and from the **Re-test now** button; it never runs on a normal page load.
+
 The same page also has an **llms.txt editor** (as of v0.1.10) — see [llms.txt serving](#llmstxt-serving) below.
 
 ### llms.txt serving
@@ -90,6 +92,8 @@ The plugin ships a generic `llms.txt` template in the plugin directory, used as 
 **To customise it, use the "llms.txt" editor on the plugin's Settings page** (as of v0.1.10). The editor is prefilled with the current effective content — your saved custom content if you have any, otherwise the bundled default template. Saving stores your content in the database, so it survives plugin upgrades; a "Reset to default" button discards your saved content and reverts to the bundled template. The "Machine-readable content" section at the bottom of the template, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing. Changes are picked up immediately by the virtual handler, though served copies may be cached by browsers and proxies for up to an hour.
 
 The bundled file in the plugin directory is the read-only default template. Editing it directly is no longer the supported path and **those edits are overwritten when you upgrade the plugin** — copy any customisation you made to the bundled file before upgrading to v0.1.10, then paste it into the editor.
+
+If the negotiation self-test reports **blocked**, the bundled default is served with its "Machine-readable content" section replaced by a neutral, attribution-only "About this file" section — the plugin does not claim a capability agents cannot actually get on plain-URL requests. **Content you saved in the editor is always served verbatim**, whether or not it is blocked; the plugin surfaces the mismatch as an admin warning instead of altering it. When the status is working or unknown, the bundled template is served byte-for-byte unchanged.
 
 **If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy — default or saved — is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The same warning appears inside the llms.txt editor. The plugin never reads, edits, or deletes your existing file.
 
@@ -108,8 +112,24 @@ Conversion is handled by the vendored `league/html-to-markdown` library.
 
 ### Known limitations
 
-- **WP Super Cache — reverse race condition.** As of v0.1.7, the plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction is not yet fixed: if WPSC caches the **HTML** response for a URL first, markdown requests to that same URL can be blocked from ever reaching an agent, because WPSC's `wpsc_get_accept_header()` maps `text/markdown` to `text/html` internally and treats them as the same cache entry. Fixing this fully requires a change in WP Super Cache's own plugin extension directory, not just this plugin. If you run WP Super Cache, be aware the dashboard's "wanted markdown" figures may undercount on cached URLs.
+- **WP Super Cache — reverse race condition (addressable, see below).** As of v0.1.7, the plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction — WPSC caching the **HTML** response first and then serving it to `Accept: text/markdown` requests, because `wpsc_get_accept_header()` maps `text/markdown` to `text/html` — is addressed by the bundled adapter described in [WP Super Cache adapter](#wp-super-cache-adapter), except in WP Super Cache's Expert (mod_rewrite) mode. If you run WP Super Cache in that mode, or run another page cache or CDN, use the negotiation self-test on the Settings page to see whether markdown is actually reaching agents.
 - **HTML entity decoding.** Standard HTML entities (e.g. `&amp;`) are currently preserved as-is in converted markdown rather than decoded, so agents may see `&amp;` where a human reader would see `&`. This doesn't break parsing but is cosmetically imperfect.
+
+### WP Super Cache adapter
+
+WP Super Cache's read path runs in `advanced-cache.php` before normal plugins load, so `mdf_maybe_serve_markdown()` never runs for a URL whose HTML is already cached. WP Super Cache supports loading arbitrary files early: `wpsc_add_plugin()` stores a path relative to `ABSPATH` in its `wpsc_plugins` setting, and `wp-cache-phase1.php` includes every registered file during the cache phase.
+
+MDF Analytics ships a small adapter, `mdf-supercache-adapter.php`, **inside its own plugin directory**, and registers it by path when markdown offering is enabled and WP Super Cache is present and caching. Because the file lives in the MDF plugin, it survives WP Super Cache upgrades (unlike a file dropped in WP Super Cache's own `plugins/` directory, which its admin page warns is wiped on upgrade) and is removed cleanly on deactivation and uninstall.
+
+The adapter hooks WP Super Cache's `wp_cache_get_cookies_values` cache action. When — and only when — the request carries `Accept: text/markdown` (case-insensitive), it appends a short fixed literal marker. This value is concatenated into the cache key, so markdown requests get their own cache bucket, **and** a non-empty value makes WP Super Cache's static supercache gate stand aside ("Cookies found. Cannot serve a supercache file."), so the request reaches PHP and the markdown is served with `Vary: Accept`. No part of the client-supplied header is ever interpolated into the cache key; a missing, malformed, or non-string `Accept` is treated as "not markdown", and a non-markdown request is returned completely unchanged, so browser behaviour is bit-for-bit identical.
+
+**Expert (mod_rewrite) mode.** If WP Super Cache is configured in Expert mode, Apache serves the cached HTML file directly from `.htaccess` before any PHP runs, so no adapter can fix it. The plugin detects this and says so in the Settings status rather than claiming a fix. To handle markdown requests yourself, add a condition that skips the supercache rewrite when the `Accept` header asks for markdown — for example, add the following to **each** `RewriteCond` block that serves a `supercache` file, before the existing `RewriteRule`:
+
+```apache
+RewriteCond %{HTTP:Accept} !text/markdown [NC]
+```
+
+The plugin never writes to `.htaccess`; this is a manual, optional change. This adapter targets WP Super Cache only — it does not attempt to work around LiteSpeed Cache, W3 Total Cache, WP Rocket, or a CDN. For those (and for Expert mode), the negotiation self-test is what tells you the truth.
 
 ---
 
@@ -151,6 +171,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.11 | 2026-09-20 | Added: negotiation self-test (working/blocked/unknown) stored in `mdf_negotiation_status`; honest `/llms.txt` that drops the markdown-negotiation claim when blocked while never altering saved custom content; bundled WP Super Cache adapter registered by path via `wpsc_plugins`, fixing the reverse race in standard mode with an honest Expert (mod_rewrite) caveat. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.10 | 2026-09-19 | Added: in-admin llms.txt editor on the Settings page — content is stored in the database (option `mdf_llms_txt`) and survives plugin upgrades; the bundled file becomes the read-only default template; a static-webroot warning is shown in the editor. Changed: `/llms.txt` now serves the stored option when set, falling back to the bundled default otherwise. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.9 | 2026-09-01 | Fix: backfill and per-post rebuild recovery when the scheduled cron event is lost to a race with another scheduler — scheduling is now verified and retried, with a self-heal recheck on existing crons and admin page loads. Added: persistent markdown-coverage status line on the Settings page. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.8 | 2026-09-01 | Added: uninstall hook removes the DB table, markdown cache directory, plugin options, and scheduled events. Added: activation-time detection + dismissible admin notice for a pre-existing static `/llms.txt`, with a copy-paste "Machine-readable content" snippet. Changed: bundled `llms.txt` replaced with a generic owner-editable template. See [CHANGELOG.md](CHANGELOG.md). |

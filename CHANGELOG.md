@@ -12,6 +12,50 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-20
+
+### Added
+- **Negotiation self-test.** A loopback request (`wp_remote_get()`, 5-second
+  timeout) to a plain-URL permalink with a cached markdown version, sending
+  `Accept: text/markdown`, records whether markdown actually reaches clients in
+  the `mdf_negotiation_status` option (autoload off) as
+  `{status, checked, detail}`. Outcomes: **working** (markdown returned),
+  **blocked** (200 with `text/html` — something in front of WordPress is
+  serving a cached page), and **unknown** (request failed, timed out, was
+  refused, or returned a non-200 — never reported as blocked). Runs on
+  activation, when "Offer markdown to agents" is switched on, on a daily cron
+  event, and from a **Re-test** button on the Settings page; never on a normal
+  page load. When a request comes back as HTML while the WP Super Cache adapter
+  is registered, the test retries once after a short delay so a just-registered
+  adapter propagating through a compiled-config cache is not misreported as
+  blocked.
+- **Honest llms.txt.** When the self-test reports **blocked**, the bundled
+  default template is served with its "Machine-readable content" section
+  replaced by a neutral, attribution-only "About this file" section. Content
+  the owner saved in the editor is always served verbatim; the mismatch is
+  surfaced only as an admin warning. Working/unknown serve the template
+  byte-for-byte unchanged.
+- **Bundled WP Super Cache adapter** (`mdf-supercache-adapter.php`). Registered
+  by path via WP Super Cache's `wpsc_plugins` setting on activation and when
+  markdown offering is enabled, and removed on deactivation and uninstall.
+  Hooks `wp_cache_get_cookies_values` and appends a fixed literal marker
+  (`mdfmd`) only when `Accept: text/markdown` is present, giving markdown
+  requests their own cache key and making the static supercache gate stand
+  aside so the request reaches PHP. No part of the raw header enters the cache
+  key. Browser requests return bit-for-bit identical input.
+- Settings-page status next to the markdown toggle, with a per-state
+  explanation, the WP Super Cache mode/adapter-registration state, and a
+  warning when a saved custom llms.txt may still claim markdown serving.
+
+### Known limitations
+- WP Super Cache **Expert (mod_rewrite) mode** is not fixed by the adapter:
+  Apache serves cached files from `.htaccess` before PHP runs. The Settings
+  status says so, and the README documents the `RewriteCond` a user needs to
+  add. Other page caches, CDNs, and reverse proxies are out of scope — the
+  self-test tells those users the truth instead of claiming a fix.
+- The self-test requires at least one cached markdown file and a working
+  loopback request; otherwise it reports **unknown**, which is expected.
+
 ## [0.1.10] - 2026-09-19
 
 ### Added
