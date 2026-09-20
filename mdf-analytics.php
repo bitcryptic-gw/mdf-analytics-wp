@@ -3,7 +3,7 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
- * Version:     0.1.11
+ * Version:     0.1.12
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.11' );
+define( 'MDF_VERSION',    '0.1.12' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
@@ -28,6 +28,10 @@ define( 'MDF_WPSC_ADAPTER_FILE', 'mdf-supercache-adapter.php' );
 
 // README anchor for the adapter + negotiation-status documentation.
 define( 'MDF_NEGOTIATION_README_URL', 'https://github.com/bitcryptic-gw/mdf-analytics-wp#wp-super-cache-adapter' );
+
+// Owner override: the site owner has verified markdown negotiation themselves.
+// Never set by default or programmatically; only from the Settings page.
+define( 'MDF_OWNER_CONFIRMED_OPTION', 'mdf_negotiation_owner_confirmed' );
 
 // Hard cap for the owner-supplied llms.txt stored in the mdf_llms_txt option.
 // Anything larger is rejected outright rather than silently truncated.
@@ -738,40 +742,274 @@ function mdf_negotiation_is_blocked(): bool {
 }
 
 /**
- * Pick a plain, public URL on this site that has a cached .md file.
- *
- * The URL is deliberately the site's own permalink with no added query string,
- * so the loopback follows the same path a real agent would — including any
- * page cache in front of WordPress.
+ * Whether the site owner has explicitly confirmed negotiation themselves.
  */
-function mdf_negotiation_test_url(): string {
-    $ids = mdf_list_cached_post_ids();
-    sort( $ids, SORT_NUMERIC );
-
-    foreach ( $ids as $id ) {
-        $post = get_post( (int) $id );
-        if ( ! $post instanceof \WP_Post || $post->post_status !== 'publish' ) {
-            continue;
-        }
-        $permalink = get_permalink( $post );
-        if ( is_string( $permalink ) && $permalink !== '' ) {
-            return $permalink;
-        }
-    }
-
-    return '';
+function mdf_negotiation_owner_confirmed(): bool {
+    return (bool) get_option( MDF_OWNER_CONFIRMED_OPTION, false );
 }
 
 /**
- * Perform the negotiation self-test, retrying once if a plain-URL request
- * comes back as HTML while the WP Super Cache adapter is registered.
+ * Whether the bundled llms.txt may assert that the site serves markdown.
  *
- * The retry exists because registering the adapter rewrites WP Super Cache's
- * config file; a worker holding a stale compiled copy of that config can serve
- * one more cached HTML page immediately after registration. A single delayed
- * retry stops the self-test from reporting "blocked" during that brief window.
- * A genuinely blocked site (another cache, or a cache the adapter cannot help
- * with) stays blocked on the retry and is reported honestly.
+ * Only when markdown offering is enabled AND negotiation is actually confirmed
+ * — either by the self-test (`working`) or by the owner's explicit override.
+ * Offering off, `blocked`, and un-overridden `unknown` all withhold the claim.
+ */
+function mdf_negotiation_claim_confirmed(): bool {
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return false;
+    }
+    // A blocked result is direct evidence and beats any earlier owner assertion.
+    if ( mdf_negotiation_is_blocked() ) {
+        return false;
+    }
+    if ( mdf_negotiation_owner_confirmed() ) {
+        return true;
+    }
+
+    return mdf_get_negotiation_status()['status'] === 'working';
+}
+
+/**
+ * Return the post IDs eligible to be probed, most preferred first.
+ *
+ * A post qualifies only when it has a non-empty cached .md file, is published,
+ * is not password-protected, and is of a publicly viewable post type. The front
+ * page is preferred when it is a qualifying cached page; otherwise the most
+ * recently modified qualifying post leads. Later candidates follow by most
+ * recently modified.
+ *
+ * @return int[]
+ */
+function mdf_negotiation_candidate_post_ids(): array {
+    $ids       = mdf_list_cached_post_ids();
+    $posts_dir = mdf_cache_posts_dir();
+
+    $qualifying = [];
+    foreach ( $ids as $id ) {
+        $id = (int) $id;
+
+        $path = $posts_dir . '/' . $id . '.md';
+        clearstatcache( true, $path );
+        if ( ! is_file( $path ) ) {
+            continue;
+        }
+        $size = filesize( $path );
+        if ( $size === false || $size <= 0 ) {
+            continue;
+        }
+
+        $post = get_post( $id );
+        if ( ! $post instanceof \WP_Post ) {
+            continue;
+        }
+        if ( $post->post_status !== 'publish' ) {
+            continue;
+        }
+        if ( $post->post_password !== '' ) {
+            continue;
+        }
+        if ( ! is_post_type_viewable( $post->post_type ) ) {
+            continue;
+        }
+
+        $qualifying[ $id ] = $post;
+    }
+
+    // Front page first, when it is a qualifying cached page.
+    $ordered = [];
+    if ( get_option( 'show_on_front' ) === 'page' ) {
+        $front_id = (int) get_option( 'page_on_front' );
+        if ( $front_id > 0 && isset( $qualifying[ $front_id ] ) ) {
+            $ordered[] = $front_id;
+        }
+    }
+
+    // Then most recently modified first.
+    uasort(
+        $qualifying,
+        static function ( $a, $b ) {
+            return strcmp( (string) $b->post_modified_gmt, (string) $a->post_modified_gmt );
+        }
+    );
+
+    foreach ( array_keys( $qualifying ) as $id ) {
+        if ( ! in_array( $id, $ordered, true ) ) {
+            $ordered[] = $id;
+        }
+    }
+
+    return $ordered;
+}
+
+/**
+ * Return up to $limit distinct, plain, public URLs to probe, preferring the
+ * front page and then the most recently modified qualifying content.
+ *
+ * @return string[]
+ */
+function mdf_negotiation_test_urls( int $limit = 3 ): array {
+    $urls = [];
+
+    foreach ( mdf_negotiation_candidate_post_ids() as $id ) {
+        $permalink = get_permalink( $id );
+        if ( ! is_string( $permalink ) || $permalink === '' ) {
+            continue;
+        }
+        if ( in_array( $permalink, $urls, true ) ) {
+            continue;
+        }
+
+        $urls[] = $permalink;
+        if ( count( $urls ) >= $limit ) {
+            break;
+        }
+    }
+
+    return $urls;
+}
+
+/**
+ * Probe each URL: confirm it is publicly reachable (HTTP 200) before drawing
+ * any conclusion from the markdown request, then tally the markdown responses.
+ *
+ * A URL that is not reachable is skipped (its probe is invalid); this is what
+ * keeps a stale cached .md whose permalink now 404s from producing a result.
+ *
+ * @param string[] $urls
+ * @return array{probes:int,reachable:int,markdown:int,html:int,other:int,notes:string[]}
+ */
+function mdf_probe_negotiation_urls( array $urls ): array {
+    $result = [
+        'probes'    => 0,
+        'reachable' => 0,
+        'markdown'  => 0,
+        'html'      => 0,
+        'other'     => 0,
+        'notes'     => [],
+    ];
+
+    foreach ( $urls as $url ) {
+        $reach = wp_remote_get(
+            $url,
+            [
+                'timeout'     => 5,
+                'redirection' => 0,
+                'headers'     => [ 'Accept' => 'text/html' ],
+                'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
+            ]
+        );
+
+        if ( is_wp_error( $reach ) ) {
+            $result['notes'][] = 'reachability check failed (' . $reach->get_error_code() . ')';
+            continue;
+        }
+
+        $reach_code = (int) wp_remote_retrieve_response_code( $reach );
+        if ( $reach_code !== 200 ) {
+            $result['notes'][] = 'base URL not reachable (HTTP ' . $reach_code . ')';
+            continue;
+        }
+        $result['reachable']++;
+
+        $response = wp_remote_get(
+            $url,
+            [
+                'timeout'     => 5,
+                'redirection' => 0,
+                'headers'     => [ 'Accept' => 'text/markdown' ],
+                'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
+            ]
+        );
+
+        if ( is_wp_error( $response ) ) {
+            $result['notes'][] = 'markdown probe failed (' . $response->get_error_code() . ')';
+            continue;
+        }
+
+        $code  = (int) wp_remote_retrieve_response_code( $response );
+        $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
+
+        if ( $code !== 200 ) {
+            $result['notes'][] = 'markdown probe returned HTTP ' . $code;
+            continue;
+        }
+
+        $result['probes']++;
+
+        if ( strpos( $ctype, 'text/markdown' ) !== false ) {
+            $result['markdown']++;
+        } elseif ( strpos( $ctype, 'text/html' ) !== false ) {
+            $result['html']++;
+        } else {
+            $result['other']++;
+            $result['notes'][] = 'markdown probe returned ' . ( $ctype !== '' ? $ctype : 'no content-type' );
+        }
+    }
+
+    return $result;
+}
+
+/**
+ * Turn raw probe tallies into a stored self-test result.
+ *
+ * @param array{probes:int,reachable:int,markdown:int,html:int,other:int,notes:string[]} $r
+ * @return array{status:string,checked:int,detail:string}
+ */
+function mdf_summarize_negotiation_probe( array $r, int $checked ): array {
+    $suffix = ! empty( $r['notes'] )
+        ? ' (' . implode( '; ', array_slice( array_unique( $r['notes'] ), 0, 3 ) ) . ')'
+        : '';
+
+    if ( $r['probes'] === 0 ) {
+        return [
+            'status'  => 'unknown',
+            'checked' => $checked,
+            'detail'  => 'No probe URL returned a usable 200 response' . $suffix . '.',
+        ];
+    }
+
+    if ( $r['html'] === 0 && $r['other'] === 0 ) {
+        return [
+            'status'  => 'working',
+            'checked' => $checked,
+            'detail'  => sprintf( 'All %d probed URL(s) returned text/markdown.', $r['probes'] ),
+        ];
+    }
+
+    if ( $r['html'] > 0 ) {
+        $detail = $r['markdown'] > 0
+            ? sprintf(
+                '%d of %d probed URL(s) returned markdown, %d returned text/html — inconsistent.',
+                $r['markdown'],
+                $r['probes'],
+                $r['html']
+            )
+            : sprintf( 'All %d probed URL(s) returned text/html instead of markdown.', $r['probes'] );
+
+        return [
+            'status'  => 'blocked',
+            'checked' => $checked,
+            'detail'  => $detail,
+        ];
+    }
+
+    return [
+        'status'  => 'unknown',
+        'checked' => $checked,
+        'detail'  => 'Probe responses were not markdown or HTML' . $suffix . '.',
+    ];
+}
+
+/**
+ * Perform the negotiation self-test.
+ *
+ * Probes up to three qualifying URLs (front page first, then most recently
+ * modified), confirming each is publicly reachable before drawing any
+ * conclusion. Retries the whole set once if a probe comes back as HTML while
+ * the WP Super Cache adapter is registered — registering the adapter rewrites
+ * WP Super Cache's config file, and a worker holding a stale compiled copy can
+ * serve one more cached HTML page immediately afterwards.
  *
  * @return array{status:string,checked:int,detail:string}
  */
@@ -786,81 +1024,27 @@ function mdf_perform_negotiation_self_test(): array {
         ];
     }
 
-    $url = mdf_negotiation_test_url();
-    if ( $url === '' ) {
+    $urls = mdf_negotiation_test_urls( 3 );
+    if ( empty( $urls ) ) {
         return [
             'status'  => 'unknown',
             'checked' => $checked,
-            'detail'  => 'No cached markdown content is available to test yet.',
+            'detail'  => 'No qualifying cached markdown content (non-empty, published, publicly viewable) is available to test yet.',
         ];
     }
 
-    $args = [
-        'timeout'     => 5,
-        'redirection' => 0,
-        'headers'     => [ 'Accept' => 'text/markdown' ],
-        'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
-    ];
+    $result = mdf_probe_negotiation_urls( $urls );
 
-    $max_attempts = 2;
-
-    for ( $attempt = 1; $attempt <= $max_attempts; $attempt++ ) {
-        $response = wp_remote_get( $url, $args );
-
-        if ( is_wp_error( $response ) ) {
-            return [
-                'status'  => 'unknown',
-                'checked' => $checked,
-                'detail'  => 'Self-test request failed: ' . $response->get_error_code() . '.',
-            ];
+    if ( $result['html'] > 0 && mdf_wpsc_adapter_registered() ) {
+        if ( function_exists( 'opcache_invalidate' ) ) {
+            // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+            @opcache_invalidate( WP_CONTENT_DIR . '/wp-cache-config.php', true );
         }
-
-        $code  = (int) wp_remote_retrieve_response_code( $response );
-        $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
-
-        if ( $code === 200 && strpos( $ctype, 'text/markdown' ) !== false ) {
-            return [
-                'status'  => 'working',
-                'checked' => $checked,
-                'detail'  => 'Plain-URL request returned ' . $ctype . '.',
-            ];
-        }
-
-        if ( $code === 200 && strpos( $ctype, 'text/html' ) !== false ) {
-            // Give a just-registered adapter a moment to propagate, then retry
-            // once before concluding the site is genuinely blocked.
-            if ( $attempt < $max_attempts && mdf_wpsc_adapter_registered() ) {
-                if ( function_exists( 'opcache_invalidate' ) ) {
-                    // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-                    @opcache_invalidate( WP_CONTENT_DIR . '/wp-cache-config.php', true );
-                }
-                usleep( 2000000 );
-                continue;
-            }
-
-            return [
-                'status'  => 'blocked',
-                'checked' => $checked,
-                'detail'  => 'Plain-URL request returned ' . $ctype . ' instead of markdown.',
-            ];
-        }
-
-        return [
-            'status'  => 'unknown',
-            'checked' => $checked,
-            'detail'  => sprintf(
-                'Unexpected self-test response (HTTP %d%s).',
-                $code,
-                $ctype !== '' ? ', ' . $ctype : ''
-            ),
-        ];
+        usleep( 2000000 );
+        $result = mdf_probe_negotiation_urls( $urls );
     }
 
-    return [
-        'status'  => 'unknown',
-        'checked' => $checked,
-        'detail'  => 'Self-test did not produce a result.',
-    ];
+    return mdf_summarize_negotiation_probe( $result, $checked );
 }
 
 /**
@@ -879,6 +1063,12 @@ function mdf_run_negotiation_self_test(): array {
     $running = true;
     $result  = mdf_perform_negotiation_self_test();
     update_option( 'mdf_negotiation_status', $result, false );
+
+    // A blocked result is evidence and beats an earlier owner assertion.
+    if ( $result['status'] === 'blocked' ) {
+        delete_option( MDF_OWNER_CONFIRMED_OPTION );
+    }
+
     $running = false;
 
     return $result;
@@ -1316,6 +1506,7 @@ function mdf_uninstall(): void {
     delete_option( 'mdf_static_llms_txt_notice_dismissed' );
     delete_option( 'mdf_llms_txt' );
     delete_option( 'mdf_negotiation_status' );
+    delete_option( MDF_OWNER_CONFIRMED_OPTION );
 
     // Clear scheduled events.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
@@ -1671,16 +1862,18 @@ function mdf_llms_txt_without_negotiation_claim( string $content ): string {
  * Resolve the llms.txt content to actually serve.
  *
  * Custom owner content is always served verbatim. The bundled default is
- * served unchanged unless the negotiation self-test reports blocked, in which
- * case its markdown-negotiation claim is removed (it would be false for
- * plain-URL requests on this site).
+ * served unchanged only when the markdown claim is confirmed (offering enabled
+ * and negotiation confirmed by the self-test or the owner's override). In every
+ * other case — offering off, blocked, or unconfirmed unknown — the claim is
+ * replaced with the neutral attribution-only section, because publishing it
+ * would assert something the site has not been shown to do.
  *
  * @return array{content:string,modified:int,custom:bool}
  */
 function mdf_get_servable_llms_txt(): array {
     $effective = mdf_get_effective_llms_txt();
 
-    if ( ! $effective['custom'] && mdf_negotiation_is_blocked() ) {
+    if ( ! $effective['custom'] && ! mdf_negotiation_claim_confirmed() ) {
         $effective['content'] = mdf_llms_txt_without_negotiation_claim( $effective['content'] );
     }
 
@@ -1765,53 +1958,71 @@ function mdf_register_menu(): void {
  * Render the negotiation self-test status next to the markdown toggle.
  */
 function mdf_render_negotiation_status_block(): void {
+    $offer       = (bool) get_option( 'mdf_offer_markdown', false );
     $status      = mdf_get_negotiation_status();
+    $owner       = mdf_negotiation_owner_confirmed();
+    $claim       = mdf_negotiation_claim_confirmed();
     $wpsc_active = mdf_wpsc_active();
     $mod_rewrite = mdf_wpsc_mod_rewrite_mode();
     $adapter     = $wpsc_active && mdf_wpsc_adapter_registered();
 
-    $labels = [
-        'working' => [ '#1e7e34', 'Working' ],
-        'blocked' => [ '#b32d2e', 'Blocked' ],
-        'unknown' => [ '#646970', 'Not verified' ],
-    ];
-    [ $color, $label ] = $labels[ $status['status'] ];
+    if ( ! $offer ) {
+        $color = '#646970';
+        $label = 'Offering off';
+    } elseif ( $status['status'] === 'blocked' ) {
+        $color = '#b32d2e';
+        $label = 'Blocked';
+    } elseif ( $owner ) {
+        $color = '#1e7e34';
+        $label = 'Confirmed by owner';
+    } elseif ( $status['status'] === 'working' ) {
+        $color = '#1e7e34';
+        $label = 'Confirmed by self-test';
+    } else {
+        $color = '#9e6b00';
+        $label = 'Unconfirmed';
+    }
 
     $link = '<a href="' . esc_url( MDF_NEGOTIATION_README_URL ) . '" target="_blank" rel="noopener noreferrer">README</a>';
     ?>
     <div style="margin-top:10px; padding:10px 12px; background:#fff; border:1px solid #dcdcde; border-left:4px solid <?php echo esc_attr( $color ); ?>; border-radius:3px;">
-        <p style="margin:0 0 4px;"><strong style="color:<?php echo esc_attr( $color ); ?>;">Negotiation self-test: <?php echo esc_html( $label ); ?></strong></p>
+        <p style="margin:0 0 4px;"><strong style="color:<?php echo esc_attr( $color ); ?>;">Markdown negotiation: <?php echo esc_html( $label ); ?></strong></p>
         <p style="margin:0;">
         <?php
-        switch ( $status['status'] ) {
-            case 'working':
-                echo 'Plain-URL requests with <code>Accept: text/markdown</code> receive markdown.';
-                break;
-
-            case 'blocked':
-                echo 'A page cache is serving HTML to agents. Requests to a plain URL (no query string) are answered with cached HTML even when they ask for markdown, so agents are told to expect something the site does not deliver. ';
-                if ( $wpsc_active && $mod_rewrite === true ) {
-                    echo 'WP Super Cache is in <strong>Expert (mod_rewrite) mode</strong>: Apache serves cached pages before PHP runs, so the bundled adapter cannot help. Add the <code>RewriteCond</code> shown in the ' . $link . ' to your <code>.htaccess</code> supercache rules.';
-                } elseif ( $wpsc_active && $adapter ) {
-                    echo 'WP Super Cache is active and the MDF adapter is registered, but the plain URL still returned HTML — clear the WP Super Cache cache and re-test, and check for another cache or CDN in front of the site. See the ' . $link . '.';
-                } elseif ( $wpsc_active ) {
-                    echo 'WP Super Cache is active but the MDF adapter is not registered. Toggle "Offer markdown to agents" off and on to register it. See the ' . $link . '.';
-                } else {
-                    echo 'A page cache or CDN in front of WordPress is serving cached HTML. See the ' . $link . '.';
-                }
-                break;
-
-            default:
-                echo 'The self-test could not confirm the result (the loopback request failed, timed out, or returned a non-200). This is normal on many hosts and is not treated as blocked.';
-                break;
+        if ( ! $offer ) {
+            echo 'Markdown offering is off, so the plugin serves no markdown and <code>/llms.txt</code> withholds the machine-readable claim.';
+        } elseif ( $status['status'] === 'blocked' ) {
+            echo 'A page cache is serving HTML to agents, so <code>/llms.txt</code> withholds the machine-readable claim. ';
+            if ( $wpsc_active && $mod_rewrite === true ) {
+                echo 'WP Super Cache is in <strong>Expert (mod_rewrite) mode</strong>: Apache serves cached pages before PHP runs, so the bundled adapter cannot help. Add the <code>RewriteCond</code> shown in the ' . $link . ' to your <code>.htaccess</code> supercache rules.';
+            } elseif ( $wpsc_active && $adapter ) {
+                echo 'WP Super Cache is active and the MDF adapter is registered, but a plain URL still returned HTML — clear the WP Super Cache cache and re-test, and check for another cache or CDN in front of the site. See the ' . $link . '.';
+            } elseif ( $wpsc_active ) {
+                echo 'WP Super Cache is active but the MDF adapter is not registered. Toggle "Offer markdown to agents" off and on to register it. See the ' . $link . '.';
+            } else {
+                echo 'A page cache or CDN in front of WordPress is serving cached HTML. See the ' . $link . '.';
+            }
+        } elseif ( $owner ) {
+            echo 'You have confirmed markdown negotiation manually, so <code>/llms.txt</code> publishes the machine-readable claim.';
+            if ( $status['status'] === 'unknown' ) {
+                echo ' The self-test could not confirm it (this is normal on hosts that block loopback requests).';
+            }
+        } elseif ( $status['status'] === 'working' ) {
+            echo 'Plain-URL requests with <code>Accept: text/markdown</code> receive markdown, so <code>/llms.txt</code> publishes the machine-readable claim.';
+        } else {
+            echo 'The self-test could not confirm negotiation (the loopback failed, timed out, or returned a non-200). This is normal on hosts that block loopback requests. <code>/llms.txt</code> withholds the machine-readable claim until it is confirmed — either by a passing self-test or by your own verification below.';
         }
         ?>
         </p>
+
+        <p class="description" style="margin:6px 0 0;"><strong>Machine-readable claim in /llms.txt:</strong> <?php echo $claim ? 'published' : 'withheld'; ?>.</p>
+
         <?php if ( $status['checked'] > 0 ) : ?>
-            <p class="description" style="margin:6px 0 0;">
+            <p class="description" style="margin:4px 0 0;">
                 Last checked <?php echo esc_html( wp_date( 'Y-m-d H:i:s', $status['checked'] ) ); ?><?php echo $status['detail'] !== '' ? ' — ' . esc_html( $status['detail'] ) : ''; ?>
             </p>
         <?php endif; ?>
+
         <?php if ( $wpsc_active ) : ?>
             <?php
             if ( $mod_rewrite === true ) {
@@ -1826,10 +2037,28 @@ function mdf_render_negotiation_status_block(): void {
                 WP Super Cache: <code><?php echo esc_html( $mode_label ); ?></code>; MDF adapter <?php echo $adapter ? 'registered' : 'not registered'; ?>.
             </p>
         <?php endif; ?>
-        <?php if ( $status['status'] === 'blocked' && mdf_get_llms_txt_option()['content'] !== '' ) : ?>
-            <p class="description" style="margin:4px 0 0;">Your saved llms.txt is served verbatim, so its "Machine-readable content" section may still claim markdown serving. Review it below.</p>
+
+        <?php if ( ! $claim && mdf_get_llms_txt_option()['content'] !== '' ) : ?>
+            <p class="description" style="margin:4px 0 0;">Your saved llms.txt is served verbatim, so its own "Machine-readable content" section (if it has one) is still published as you wrote it. Edit it below if that is no longer accurate.</p>
         <?php endif; ?>
-        <p style="margin:8px 0 0;"><input type="submit" name="mdf_negotiation_retest" class="button button-secondary" value="Re-test now"></p>
+
+        <?php if ( $offer && $status['status'] === 'unknown' ) : ?>
+            <?php
+            $verify_cmd = "curl -sI -H 'Accept: text/markdown' " . home_url( '/' );
+            ?>
+            <div style="margin-top:8px; padding:8px 10px; background:#f6f7f7; border:1px solid #dcdcde; border-radius:3px;">
+                <p style="margin:0 0 4px;">
+                    <label><input type="checkbox" name="mdf_negotiation_owner_confirmed" value="1" <?php checked( $owner ); ?>> I have verified markdown negotiation myself</label>
+                </p>
+                <p class="description" style="margin:0 0 4px;">The plugin could not confirm negotiation with its loopback request (common on hosts that block loopback HTTP). You can check it yourself. Run:</p>
+                <pre style="margin:0 0 4px; padding:6px 8px; background:#fff; border:1px solid #dcdcde; overflow:auto;"><?php echo esc_html( $verify_cmd ); ?></pre>
+                <p class="description" style="margin:0;">A confirmed site answers with <code>content-type: text/markdown</code> and <code>Vary: Accept</code> instead of HTML. Only tick the box if you have seen that. Leaving it unticked keeps the machine-readable claim withheld. This override is cleared automatically if you switch markdown offering off or if a later self-test reports blocked.</p>
+            </div>
+        <?php endif; ?>
+
+        <?php if ( $offer ) : ?>
+            <p style="margin:8px 0 0;"><input type="submit" name="mdf_negotiation_retest" class="button button-secondary" value="Re-test now"></p>
+        <?php endif; ?>
     </div>
     <?php
 }
@@ -1865,6 +2094,17 @@ function mdf_render_settings(): void {
             // Reflect that negotiation is no longer offered rather than leaving
             // a stale blocked/working result in place.
             mdf_run_negotiation_self_test();
+        }
+
+        // Owner confirmation override. The checkbox is only rendered while
+        // offering is on and the self-test is unknown, so the option is only
+        // written from that state. It is cleared whenever offering is switched
+        // off (below) and by the self-test on a later blocked result.
+        if ( ! $new_offer ) {
+            delete_option( MDF_OWNER_CONFIRMED_OPTION );
+        } elseif ( mdf_get_negotiation_status()['status'] === 'unknown' ) {
+            $owner_confirmed = isset( $_POST['mdf_negotiation_owner_confirmed'] ) && $_POST['mdf_negotiation_owner_confirmed'] === '1';
+            update_option( MDF_OWNER_CONFIRMED_OPTION, $owner_confirmed, false );
         }
 
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
@@ -1974,9 +2214,7 @@ function mdf_render_settings(): void {
                                 </p>
                             <?php endif; ?>
                         <?php endif; ?>
-                        <?php if ( $offer_markdown ) : ?>
-                            <?php mdf_render_negotiation_status_block(); ?>
-                        <?php endif; ?>
+                        <?php mdf_render_negotiation_status_block(); ?>
                     </td>
                 </tr>
             </table>

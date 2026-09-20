@@ -12,6 +12,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-20
+
+### Fixed
+- **False machine-readable claim when markdown offering is off (Defect A).**
+  The bundled `/llms.txt` now serves its "Machine-readable content" section
+  only when **both** markdown offering is enabled **and** negotiation is
+  confirmed (self-test `working`, or the owner override below). Previously the
+  claim was suppressed only on `blocked`, so a site with "Offer markdown to
+  agents" switched off still told agents it serves markdown on request, despite
+  serving none at all.
+- **Weak self-test URL selection (Defect B).** `mdf_negotiation_test_url()` is
+  replaced by candidate selection that skips non-public post types, password
+  protected and non-`publish` posts, and zero-byte or missing cached `.md`
+  files; prefers the front page and then the most recently modified qualifying
+  item; verifies each chosen URL is publicly reachable (HTTP 200) before
+  drawing any conclusion; and probes up to three distinct URLs. A chosen URL
+  that 404s now yields `unknown` with an explanatory detail instead of a
+  misleading result. A mix of markdown and HTML across probes is reported
+  `blocked` naming the split; `working` is reported only when every probe that
+  returned 200 returned markdown. The retry, re-entry guard, 5-second timeout,
+  `redirection 0`, and self-test UA remain.
+
+### Added
+- **Owner confirmation override.** When offering is on and the self-test is
+  `unknown` (common on hosts that block loopback requests), the Settings page
+  offers a checkbox to confirm negotiation manually, next to the exact `curl`
+  command and the expected response (`content-type: text/markdown`,
+  `Vary: Accept`). Stored in its own `mdf_negotiation_owner_confirmed` option
+  (autoload off); never enabled by default or set programmatically; cleared
+  automatically when offering is switched off or when a later self-test reports
+  `blocked` (evidence beats the earlier assertion). Nonce and
+  `manage_options` as with every other state change.
+- The Settings page now always shows the negotiation state and whether the
+  machine-readable claim is **published** or **withheld**, with the reason
+  legible in one line: offering off, unconfirmed (loopback failed), confirmed
+  by self-test, confirmed by owner, or blocked with the cache named. A note
+  reminds owners with custom `llms.txt` content that their saved text is
+  published verbatim.
+
+### Changed
+- `mdf_get_servable_llms_txt()` gates the bundled claim on
+  `mdf_negotiation_claim_confirmed()` (offering on **and** confirmed) rather
+  than only on `blocked`. Owner-supplied `mdf_llms_txt` content is still served
+  verbatim in every state.
+
 ## [0.1.11] - 2026-09-20
 
 ### Added
