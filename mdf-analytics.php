@@ -3,7 +3,7 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
- * Version:     0.1.12
+ * Version:     0.1.13
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.12' );
+define( 'MDF_VERSION',    '0.1.13' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
@@ -846,6 +846,11 @@ function mdf_negotiation_candidate_post_ids(): array {
  * Return up to $limit distinct, plain, public URLs to probe, preferring the
  * front page and then the most recently modified qualifying content.
  *
+ * Query-string permalinks are excluded: a query string makes the page cache
+ * stand aside, so such a URL would bypass the very cache path being tested and
+ * could mask a blocked clean path. If fewer clean candidates qualify, fewer are
+ * probed; a query URL is never substituted.
+ *
  * @return string[]
  */
 function mdf_negotiation_test_urls( int $limit = 3 ): array {
@@ -854,6 +859,9 @@ function mdf_negotiation_test_urls( int $limit = 3 ): array {
     foreach ( mdf_negotiation_candidate_post_ids() as $id ) {
         $permalink = get_permalink( $id );
         if ( ! is_string( $permalink ) || $permalink === '' ) {
+            continue;
+        }
+        if ( strpos( $permalink, '?' ) !== false ) {
             continue;
         }
         if ( in_array( $permalink, $urls, true ) ) {
@@ -870,23 +878,29 @@ function mdf_negotiation_test_urls( int $limit = 3 ): array {
 }
 
 /**
- * Probe each URL: confirm it is publicly reachable (HTTP 200) before drawing
- * any conclusion from the markdown request, then tally the markdown responses.
+ * Probe each URL in both cache-key encodings, confirming it is publicly
+ * reachable (HTTP 200) before drawing any conclusion from the markdown request.
  *
- * A URL that is not reachable is skipped (its probe is invalid); this is what
- * keeps a stale cached .md whose permalink now 404s from producing a result.
+ * The page-cache key differs by `Accept-Encoding`, so a markdown response in one
+ * encoding says nothing about the other. Each URL is requested with
+ * `Accept-Encoding: gzip` and with `Accept-Encoding: identity`, and every
+ * reachable probe that returns 200 is tallied. A URL that is not reachable is
+ * skipped (its probe is invalid); this keeps a stale cached .md whose permalink
+ * now 404s from producing a result.
  *
  * @param string[] $urls
- * @return array{probes:int,reachable:int,markdown:int,html:int,other:int,notes:string[]}
+ * @return array{probes:int,reachable:int,markdown:int,html:int,other:int,html_hits:string[],other_hits:string[],notes:string[]}
  */
 function mdf_probe_negotiation_urls( array $urls ): array {
     $result = [
-        'probes'    => 0,
-        'reachable' => 0,
-        'markdown'  => 0,
-        'html'      => 0,
-        'other'     => 0,
-        'notes'     => [],
+        'probes'     => 0,
+        'reachable'  => 0,
+        'markdown'   => 0,
+        'html'       => 0,
+        'other'      => 0,
+        'html_hits'  => [],
+        'other_hits' => [],
+        'notes'      => [],
     ];
 
     foreach ( $urls as $url ) {
@@ -912,38 +926,46 @@ function mdf_probe_negotiation_urls( array $urls ): array {
         }
         $result['reachable']++;
 
-        $response = wp_remote_get(
-            $url,
-            [
-                'timeout'     => 5,
-                'redirection' => 0,
-                'headers'     => [ 'Accept' => 'text/markdown' ],
-                'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
-            ]
-        );
+        foreach ( [ 'gzip', 'identity' ] as $encoding ) {
+            $response = wp_remote_get(
+                $url,
+                [
+                    'timeout'     => 5,
+                    'redirection' => 0,
+                    'headers'     => [
+                        'Accept'          => 'text/markdown',
+                        'Accept-Encoding' => $encoding,
+                    ],
+                    'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
+                ]
+            );
 
-        if ( is_wp_error( $response ) ) {
-            $result['notes'][] = 'markdown probe failed (' . $response->get_error_code() . ')';
-            continue;
-        }
+            $label = $url . ' (' . $encoding . ')';
 
-        $code  = (int) wp_remote_retrieve_response_code( $response );
-        $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
+            if ( is_wp_error( $response ) ) {
+                $result['notes'][] = 'probe failed for ' . $label . ' (' . $response->get_error_code() . ')';
+                continue;
+            }
 
-        if ( $code !== 200 ) {
-            $result['notes'][] = 'markdown probe returned HTTP ' . $code;
-            continue;
-        }
+            $code  = (int) wp_remote_retrieve_response_code( $response );
+            $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
 
-        $result['probes']++;
+            if ( $code !== 200 ) {
+                $result['notes'][] = 'probe returned HTTP ' . $code . ' for ' . $label;
+                continue;
+            }
 
-        if ( strpos( $ctype, 'text/markdown' ) !== false ) {
-            $result['markdown']++;
-        } elseif ( strpos( $ctype, 'text/html' ) !== false ) {
-            $result['html']++;
-        } else {
-            $result['other']++;
-            $result['notes'][] = 'markdown probe returned ' . ( $ctype !== '' ? $ctype : 'no content-type' );
+            $result['probes']++;
+
+            if ( strpos( $ctype, 'text/markdown' ) !== false ) {
+                $result['markdown']++;
+            } elseif ( strpos( $ctype, 'text/html' ) !== false ) {
+                $result['html']++;
+                $result['html_hits'][] = $label;
+            } else {
+                $result['other']++;
+                $result['other_hits'][] = $label . ': ' . ( $ctype !== '' ? $ctype : 'no content-type' );
+            }
         }
     }
 
@@ -953,7 +975,11 @@ function mdf_probe_negotiation_urls( array $urls ): array {
 /**
  * Turn raw probe tallies into a stored self-test result.
  *
- * @param array{probes:int,reachable:int,markdown:int,html:int,other:int,notes:string[]} $r
+ * `working` requires every probe that returned 200, in both encodings, to be
+ * markdown. Any HTML is `blocked`, and the detail names the URL(s) and
+ * encoding(s) involved.
+ *
+ * @param array{probes:int,reachable:int,markdown:int,html:int,other:int,html_hits:string[],other_hits:string[],notes:string[]} $r
  * @return array{status:string,checked:int,detail:string}
  */
 function mdf_summarize_negotiation_probe( array $r, int $checked ): array {
@@ -973,19 +999,22 @@ function mdf_summarize_negotiation_probe( array $r, int $checked ): array {
         return [
             'status'  => 'working',
             'checked' => $checked,
-            'detail'  => sprintf( 'All %d probed URL(s) returned text/markdown.', $r['probes'] ),
+            'detail'  => sprintf( 'All %d probe(s) returned text/markdown.', $r['probes'] ),
         ];
     }
 
     if ( $r['html'] > 0 ) {
+        $hits = implode( ', ', array_slice( array_unique( $r['html_hits'] ), 0, 3 ) );
+
         $detail = $r['markdown'] > 0
             ? sprintf(
-                '%d of %d probed URL(s) returned markdown, %d returned text/html — inconsistent.',
+                '%d of %d probe(s) returned markdown but %d returned text/html (%s).',
                 $r['markdown'],
                 $r['probes'],
-                $r['html']
+                $r['html'],
+                $hits
             )
-            : sprintf( 'All %d probed URL(s) returned text/html instead of markdown.', $r['probes'] );
+            : sprintf( 'All %d probe(s) returned text/html instead of markdown (%s).', $r['probes'], $hits );
 
         return [
             'status'  => 'blocked',
@@ -1093,10 +1122,13 @@ function mdf_schedule_negotiation_self_test(): void {
 // HTML is already cached never reaches mdf_maybe_serve_markdown().
 //
 // The adapter (mdf-supercache-adapter.php, shipped inside this plugin and
-// registered by path with WP Super Cache) hooks WP Super Cache's own
-// `wp_cache_get_cookies_values` cache action. Appending a fixed marker there
-// changes the cache key and makes the static supercache gate stand aside, so
-// markdown requests fall through to PHP.
+// registered by path with WP Super Cache) hooks WP Super Cache's `cache_init`
+// action and disables the cache entirely for markdown requests: `$cache_enabled`
+// is set false, so phase 1 returns before serving and `wp_cache_postload()`
+// returns before the output buffer is wired up. Nothing is read and nothing is
+// written, so a markdown request can never be cached under a key that later
+// serves HTML to another markdown request. (An earlier marker-based design did
+// exactly that and is gone.)
 // ---------------------------------------------------------------------------
 
 /**

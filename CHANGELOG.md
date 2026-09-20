@@ -12,6 +12,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-09-20
+
+### Fixed
+- **The WP Super Cache adapter no longer poisons the cache.** It is now a
+  **total bypass**, not a separate cache bucket. On a GET/HEAD request carrying
+  `Accept: text/markdown` it hooks WP Super Cache's `cache_init` action, sets
+  `$cache_enabled = false` and defines `DONOTCACHEPAGE`. Phase 1 returns before
+  serving and `wp_cache_postload()` returns before the output-buffer callback is
+  installed, so the request neither reads nor writes the page cache.
+  The previous marker-based design (appending a fixed marker in
+  `wp_cache_get_cookies_values`) gave markdown requests their own key but also
+  made them eligible to be **written** under it; a marked request that fell
+  through to HTML rendering — no cached `.md` yet, activation before backfill
+  completes, new content — was cached as HTML under the markdown key and then
+  served to every later markdown request carrying the same marker and encoding.
+  This produced `blocked` sites and a gzip-specific blind spot (the key includes
+  the encoding, and `wp_remote_get` requests gzip by default). The
+  `wp_cache_get_cookies_values` marker hook is removed entirely; no marker, no
+  separate key, no encoding dependence. Registration by path via
+  `wpsc_add_plugin()`, gating on the markdown toggle, deactivate/uninstall
+  removal, and the Expert (mod_rewrite) caveat are unchanged.
+  - Marker-keyed entries left on disk by earlier versions become unreachable to
+    markdown requests (the read path is skipped) and expire on their own; no
+    cleanup code is added.
+- **Self-test probe selection and encodings.** Query-string permalinks are
+  excluded from the probe set (a query string bypasses the cache being tested,
+  so such a URL could return markdown on a site whose clean paths are blocked;
+  if fewer clean candidates exist, fewer are probed — a query URL is never
+  substituted). Each chosen URL is now probed in **both** `Accept-Encoding`
+  variants (gzip and identity), because the cache key differs by encoding;
+  `working` requires every reachable probe in both encodings to return markdown,
+  and any HTML is `blocked` with the URL and encoding named in the detail.
+
 ## [0.1.12] - 2026-09-20
 
 ### Fixed
