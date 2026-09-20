@@ -3,7 +3,7 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
- * Version:     0.1.10
+ * Version:     0.1.11
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
@@ -16,10 +16,15 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.10' );
+define( 'MDF_VERSION',    '0.1.11' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
+
+// Bundled WP Super Cache adapter. Registered by path (relative to ABSPATH)
+// through WP Super Cache's `wpsc_plugins` setting so it is included during the
+// early cache phase and survives WP Super Cache upgrades.
+define( 'MDF_WPSC_ADAPTER_FILE', 'mdf-supercache-adapter.php' );
 
 // Hard cap for the owner-supplied llms.txt stored in the mdf_llms_txt option.
 // Anything larger is rejected outright rather than silently truncated.
@@ -684,6 +689,151 @@ function mdf_maybe_serve_markdown(): void {
 add_action( 'template_redirect', 'mdf_maybe_serve_markdown', 5 );
 
 // ---------------------------------------------------------------------------
+// Bundled WP Super Cache adapter
+//
+// WP Super Cache folds every non-JSON Accept value into text/html and uses
+// that value for both its cache key and its static-file gate. Its read path
+// runs in advanced-cache.php before normal plugins load, so a request whose
+// HTML is already cached never reaches mdf_maybe_serve_markdown().
+//
+// The adapter (mdf-supercache-adapter.php, shipped inside this plugin and
+// registered by path with WP Super Cache) hooks WP Super Cache's own
+// `wp_cache_get_cookies_values` cache action. Appending a fixed marker there
+// changes the cache key and makes the static supercache gate stand aside, so
+// markdown requests fall through to PHP.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether WP Super Cache is active.
+ */
+function mdf_wpsc_active(): bool {
+    if ( ! function_exists( 'is_plugin_active' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+
+    return function_exists( 'is_plugin_active' ) && is_plugin_active( 'wp-super-cache/wp-cache.php' );
+}
+
+/**
+ * Whether WP Super Cache is present and actually caching this site.
+ */
+function mdf_wpsc_caching(): bool {
+    if ( ! mdf_wpsc_active() ) {
+        return false;
+    }
+    if ( ! defined( 'WP_CACHE' ) || ! WP_CACHE ) {
+        return false;
+    }
+
+    return file_exists( WP_CONTENT_DIR . '/advanced-cache.php' );
+}
+
+/**
+ * Absolute path to the bundled adapter file.
+ */
+function mdf_wpsc_adapter_path(): string {
+    return __DIR__ . '/' . MDF_WPSC_ADAPTER_FILE;
+}
+
+/**
+ * The adapter path in the ABSPATH-relative form WP Super Cache stores.
+ */
+function mdf_wpsc_adapter_relative_path(): string {
+    $file    = mdf_wpsc_adapter_path();
+    $abspath = trailingslashit( ABSPATH );
+
+    return strpos( $file, $abspath ) === 0 ? substr( $file, strlen( $abspath ) ) : $file;
+}
+
+/**
+ * Whether the adapter is present in WP Super Cache's `wpsc_plugins` list.
+ */
+function mdf_wpsc_adapter_registered(): bool {
+    if ( ! mdf_wpsc_active() || ! function_exists( 'wpsc_get_plugins' ) ) {
+        return false;
+    }
+
+    $plugins = wpsc_get_plugins();
+
+    return is_array( $plugins ) && in_array( mdf_wpsc_adapter_relative_path(), $plugins, true );
+}
+
+/**
+ * Register the bundled adapter with WP Super Cache.
+ *
+ * Only when markdown offering is enabled and WP Super Cache is actually
+ * caching. WP Super Cache itself records the path in its `wpsc_plugins`
+ * setting (ABSPATH-relative), which is read during its early cache phase.
+ */
+function mdf_maybe_register_wpsc_adapter(): void {
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return;
+    }
+    if ( ! mdf_wpsc_caching() || ! function_exists( 'wpsc_add_plugin' ) ) {
+        return;
+    }
+
+    wpsc_add_plugin( mdf_wpsc_adapter_relative_path() );
+}
+
+/**
+ * Unregister the bundled adapter from WP Super Cache.
+ */
+function mdf_maybe_unregister_wpsc_adapter(): void {
+    if ( ! function_exists( 'wpsc_delete_plugin' ) ) {
+        return;
+    }
+
+    wpsc_delete_plugin( mdf_wpsc_adapter_relative_path() );
+}
+
+/**
+ * Whether WP Super Cache is in Expert (mod_rewrite) mode.
+ *
+ * In that mode Apache serves the cached HTML file directly from .htaccess
+ * before any PHP runs, so no adapter can help. The WP Super Cache config file
+ * is included in an isolated scope to read the setting without leaking its
+ * variables into this request.
+ *
+ * @return bool|null True/false when known, null when WP Super Cache is
+ *                   inactive or its config cannot be read.
+ */
+function mdf_wpsc_mod_rewrite_mode(): ?bool {
+    static $mode = null;
+    static $done = false;
+
+    if ( $done ) {
+        return $mode;
+    }
+    $done = true;
+
+    if ( ! mdf_wpsc_active() ) {
+        return null;
+    }
+
+    $config = WP_CONTENT_DIR . '/wp-cache-config.php';
+    if ( ! is_readable( $config ) ) {
+        return null;
+    }
+
+    $wp_cache_mod_rewrite = null;
+    ob_start();
+    include $config;
+    ob_end_clean();
+
+    if ( isset( $wp_cache_mod_rewrite ) ) {
+        $mode = (bool) $wp_cache_mod_rewrite;
+    }
+
+    return $mode;
+}
+
+// Self-heal the registration on admin loads (e.g. after a plugin update, when
+// the activation hook does not run). wpsc_add_plugin() is a no-op when the
+// adapter is already registered.
+add_action( 'admin_init', 'mdf_maybe_register_wpsc_adapter' );
+
+// ---------------------------------------------------------------------------
 // Backfill — full catalogue rebuild on toggle enable
 // ---------------------------------------------------------------------------
 
@@ -902,6 +1052,11 @@ function mdf_activate(): void {
     mdf_schedule_purge();
     mdf_create_cache_dirs();
 
+    // Register the WP Super Cache adapter when markdown offering is already on
+    // (e.g. reactivation after an update). The admin-load self-heal handles the
+    // upgrade path, where the activation hook does not run.
+    mdf_maybe_register_wpsc_adapter();
+
     // If the site already has a static llms.txt in the web root, it shadows the
     // plugin's virtual copy (the web server serves it before WordPress boots).
     // Record that so an admin notice can offer the markdown-negotiation snippet
@@ -914,6 +1069,10 @@ function mdf_activate(): void {
 function mdf_deactivate(): void {
     // Deactivation is a deliberate no-op for llms.txt and cache state.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
+
+    // Remove the WP Super Cache adapter registration so a deactivated plugin
+    // has no effect on caching.
+    mdf_maybe_unregister_wpsc_adapter();
 }
 
 function mdf_uninstall(): void {
@@ -944,6 +1103,9 @@ function mdf_uninstall(): void {
     // Clear scheduled events.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
     wp_clear_scheduled_hook( 'mdf_backfill_batch' );
+
+    // Remove the WP Super Cache adapter registration.
+    mdf_maybe_unregister_wpsc_adapter();
 
     // Deliberately NOT touching the web root: the plugin never writes there.
 }
@@ -1350,16 +1512,20 @@ function mdf_render_settings(): void {
         $new_offer = isset( $_POST['mdf_offer_markdown'] ) && $_POST['mdf_offer_markdown'] === '1';
         update_option( 'mdf_offer_markdown', $new_offer );
 
-        // Toggle just flipped from off → on: kick off full backfill.
+        // Toggle just flipped from off → on: kick off full backfill, register
+        // the WP Super Cache adapter, and run the negotiation self-test.
         if ( ! $old_offer && $new_offer ) {
             update_option( 'mdf_backfill_notice_dismissed', false );
             mdf_start_backfill();
+            mdf_maybe_register_wpsc_adapter();
             echo '<div class="notice notice-info"><p><strong>MDF Analytics:</strong> Markdown offering enabled. Building markdown versions of all published posts — agents will be offered markdown as each post finishes. <a href="' . esc_url( admin_url( 'admin.php?page=mdf-analytics' ) ) . '">View dashboard →</a></p></div>';
         } elseif ( $old_offer && ! $new_offer ) {
-            // Toggle flipped off: clear the backfill queue.
+            // Toggle flipped off: clear the backfill queue and stop affecting
+            // the page cache.
             update_option( 'mdf_backfill_queue', [] );
             update_option( 'mdf_backfill_total', null );
             update_option( 'mdf_backfill_processed', 0 );
+            mdf_maybe_unregister_wpsc_adapter();
         }
 
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
@@ -1736,5 +1902,6 @@ function mdf_maybe_upgrade_db(): void {
     if ( get_option( 'mdf_db_version' ) !== MDF_VERSION ) {
         mdf_create_table();
         mdf_schedule_purge();
+        mdf_maybe_register_wpsc_adapter();
     }
 }
