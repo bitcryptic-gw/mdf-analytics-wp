@@ -1722,10 +1722,70 @@ register_activation_hook( __FILE__, 'mdf_activate' );
 register_deactivation_hook( __FILE__, 'mdf_deactivate' );
 register_uninstall_hook( __FILE__, 'mdf_uninstall' );
 
+/**
+ * One-time cleanup when the transactional-page exclusion arrives
+ * (0.1.13 → 0.1.14). Anything converted before the exclusion existed has to
+ * go: the variant files on disk, their manifest bookkeeping and their place in
+ * the cached-ID count. Runs from the activation hook and from the admin-load
+ * upgrade path, so a WP-CLI reactivation performs it too.
+ *
+ * The outcome is recorded in the `mdf_exclusion_cleanup` option and in the
+ * manifest, so a rollout can read exactly what was removed.
+ *
+ * @return int[] IDs whose cached variants were removed.
+ */
+function mdf_upgrade_exclusion_cleanup(): array {
+    $excluded = mdf_excluded_page_ids();
+    $removed  = [];
+
+    foreach ( $excluded as $post_id ) {
+        if ( mdf_delete_cached_variant( (int) $post_id ) ) {
+            $removed[] = (int) $post_id;
+        }
+    }
+
+    [ $handle, $manifest ] = mdf_manifest_lock_and_read();
+
+    $manifest['failed_ids'] = array_values( array_diff(
+        array_map( 'intval', (array) ( $manifest['failed_ids'] ?? [] ) ),
+        array_map( 'intval', $excluded )
+    ) );
+    $manifest['post_count'] = count( mdf_list_cached_post_ids() );
+
+    $record = [
+        'version'      => MDF_VERSION,
+        'at'           => gmdate( 'c' ),
+        'excluded_ids' => $excluded,
+        'removed_ids'  => $removed,
+    ];
+
+    $manifest['exclusion_cleanup'] = $record;
+    mdf_manifest_write_and_unlock( $handle, $manifest );
+
+    update_option( 'mdf_exclusion_cleanup', $record, false );
+
+    if ( ! empty( $removed ) ) {
+        error_log( 'MDF Analytics: exclusion cleanup removed cached markdown for page(s) ' . implode( ', ', $removed ) );
+    }
+
+    return $removed;
+}
+
 function mdf_activate(): void {
+    $installed = (string) get_option( 'mdf_db_version', '0' );
+
     mdf_create_table();
     mdf_schedule_purge();
     mdf_create_cache_dirs();
+
+    // 0.1.13 → 0.1.14: drop markdown already cached for pages that must never
+    // be offered. Runs before the self-test so the first result is measured
+    // against the cleaned state. Must run while the stored version still
+    // records the OLD release, hence the capture above.
+    if ( version_compare( $installed, '0.1.14', '<' ) ) {
+        mdf_upgrade_exclusion_cleanup();
+    }
+
     mdf_schedule_negotiation_self_test();
 
     // Register the WP Super Cache adapter when markdown offering is already on
@@ -2161,8 +2221,7 @@ function mdf_get_servable_llms_txt(): array {
 }
 
 /**
- * llms.txt section for sites with pages that are HTML-only by design.
- *
+ * llms.txt section for sites with pages that are HTML-only by design. *
  * The bundled claim says markdown is available for a page URL; on a
  * WooCommerce site that is not true for the cart, checkout or account pages,
  * so the served file states the exception instead of implying it.
@@ -2780,7 +2839,14 @@ add_action( 'admin_init', 'mdf_maybe_upgrade_db' );
 
 function mdf_maybe_upgrade_db(): void {
     if ( get_option( 'mdf_db_version' ) !== MDF_VERSION ) {
+        $installed = (string) get_option( 'mdf_db_version', '0' );
+
         mdf_create_table();
+
+        if ( version_compare( $installed, '0.1.14', '<' ) ) {
+            mdf_upgrade_exclusion_cleanup();
+        }
+
         mdf_schedule_purge();
         mdf_schedule_negotiation_self_test();
         mdf_maybe_register_wpsc_adapter();

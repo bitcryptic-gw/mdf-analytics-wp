@@ -169,7 +169,7 @@ $state = run_state_case( [
 ] );
 if ( isset( $state['error'] ) ) {
 	ok( false, 'state_case ran', (string) $state['error'] );
-	exit( summary() );
+	
 }
 
 same( [ 9, 10, 11, 12, 30 ], $state['excluded'], 'exclusions cover shop, cart, checkout, account and a relocated page' );
@@ -202,5 +202,43 @@ ok( in_array( 21, $state['backfill_queue'], true ), 'backfill queue still contai
 ok( true === $state['llms']['has_note'], 'Woo llms.txt states the session-only exception' );
 ok( true === $state['llms']['has_claim'], 'Woo llms.txt still publishes the claim when working' );
 ok( $state['llms']['size'] > 1161, 'Woo llms.txt is longer than the generic claim', (string) $state['llms']['size'] );
+
+// ---------------------------------------------------------------------------
+group( 'upgrade 0.1.13 -> 0.1.14: remove variants for excluded objects' );
+// ---------------------------------------------------------------------------
+
+$up = run_state_case( [
+	'woo_pages'   => $woo_pages,
+	'posts'       => [ 9 => [], 10 => [], 11 => [], 12 => [], 21 => [ 'post_type' => 'product' ] ],
+	'upgrade_md'  => [ 9 => 20, 10 => 20, 11 => 40, 12 => 30, 21 => 90 ],
+] );
+if ( isset( $up['error'] ) ) {
+	ok( false, 'upgrade state_case ran', (string) $up['error'] );
+} else {
+	$removed_order = $up['upgrade']['removed'];
+	sort( $removed_order );
+	same( [ 9, 10, 11, 12 ], $removed_order, 'upgrade removes cart, checkout, account and shop variants' );
+	same( [ 21 ], $up['upgrade']['raw_md_ids'], 'upgrade leaves the product variant on disk' );
+	same( [ 55 ], $up['upgrade']['manifest']['failed_ids'], 'upgrade drops excluded IDs from failed_ids' );
+	same( 1, $up['upgrade']['manifest']['post_count'], 'upgrade recounts post_count' );
+	$removed_ids = $up['upgrade']['option']['removed_ids'];
+	sort( $removed_ids );
+	same( [ 9, 10, 11, 12 ], $removed_ids, 'upgrade records what it removed' );
+	$excluded_ids = $up['upgrade']['option']['excluded_ids'];
+	sort( $excluded_ids );
+	same( [ 9, 10, 11, 12 ], $excluded_ids, 'upgrade records the exclusion set' );
+}
+
+$up = run_state_case( [
+	'posts'      => [ 9 => [], 10 => [] ],
+	'upgrade_md' => [ 9 => 20, 10 => 20 ],
+] );
+if ( isset( $up['error'] ) ) {
+	ok( false, 'non-Woo upgrade state_case ran', (string) $up['error'] );
+} else {
+	same( [], $up['upgrade']['removed'], 'non-Woo upgrade removes nothing' );
+	same( [ 9, 10 ], $up['upgrade']['raw_md_ids'], 'non-Woo upgrade leaves every variant in place' );
+}
+
 
 exit( summary() );

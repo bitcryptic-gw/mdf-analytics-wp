@@ -62,6 +62,30 @@ if ( ! empty( $spec['backfill'] ) ) {
 	sort( $out['backfill_queue'] );
 }
 
+if ( ! empty( $spec['upgrade_md'] ) ) {
+	foreach ( $spec['upgrade_md'] as $id => $size ) {
+		mdf_test_write_md( (int) $id, $size > 0 ? str_repeat( 'x', (int) $size ) : '' );
+	}
+	mdf_manifest_write( [ 'version' => 1, 'last_full_run' => null, 'post_count' => 5, 'failed_ids' => [ 10, 55 ] ] );
+
+	$removed = mdf_upgrade_exclusion_cleanup();
+
+	$raw = [];
+	foreach ( (array) scandir( mdf_cache_posts_dir() ) as $entry ) {
+		if ( substr( $entry, -3 ) === '.md' ) {
+			$raw[] = (int) basename( $entry, '.md' );
+		}
+	}
+	sort( $raw );
+
+	$out['upgrade'] = [
+		'removed'      => $removed,
+		'raw_md_ids'   => $raw,
+		'manifest'     => mdf_manifest_read(),
+		'option'       => get_option( 'mdf_exclusion_cleanup' ),
+	];
+}
+
 if ( ! empty( $spec['llms'] ) ) {
 	$GLOBALS['mdf_test']['options']['mdf_offer_markdown']     = true;
 	$GLOBALS['mdf_test']['options']['mdf_negotiation_status'] = [ 'status' => 'working', 'checked' => time(), 'detail' => '' ];
