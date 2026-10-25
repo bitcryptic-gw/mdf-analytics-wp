@@ -83,6 +83,13 @@ if ( ! function_exists( 'mdf_wpsc_markdown_bypass' ) ) {
             return $value;
         }
 
+        // Marker, set before DONOTCACHEPAGE: the plugin's serve path must be
+        // able to tell this deliberate define apart from a third party's
+        // (see mdf_third_party_no_cache()).
+        if ( ! defined( 'MDF_WPSC_MARKDOWN_BYPASS' ) ) {
+            define( 'MDF_WPSC_MARKDOWN_BYPASS', true );
+        }
+
         global $cache_enabled;
         $cache_enabled = false;
 

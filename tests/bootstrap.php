@@ -34,6 +34,8 @@ $GLOBALS['mdf_test'] = [
 	'http'       => [],
 	'headers'    => [],
 	'current_user' => 0,
+	'hidden_types' => [ 'hidden' ],
+	'scheduled' => [],
 ];
 
 function mdf_test_reset(): void {
@@ -51,9 +53,10 @@ function mdf_test_reset(): void {
 		'http'       => [],
 		'headers'    => [],
 		'current_user' => 0,
+		'hidden_types' => [ 'hidden' ],
+		'scheduled' => [],
 	];
-	if ( is_dir( '/tmp/mdf-test-uploads' ) ) {
-		mdf_test_rmdir( '/tmp/mdf-test-uploads' );
+	if ( is_dir( '/tmp/mdf-test-uploads' ) ) {		mdf_test_rmdir( '/tmp/mdf-test-uploads' );
 	}
 	mkdir( '/tmp/mdf-test-uploads', 0777, true );
 }
@@ -109,8 +112,12 @@ function get_posts( $args = [] ) {
 	sort( $ids );
 	return $ids;
 }
+function get_post_types( $args = [], $output = 'names' ) {
+	return [ 'post' => 'post', 'page' => 'page' ];
+}
+function wp_is_post_revision( $post ) { return false; }
 function is_post_type_viewable( $type ) {
-	return ( $GLOBALS['mdf_test']['posts'] && 'hidden' !== $type );
+	return ! in_array( $type, $GLOBALS['mdf_test']['hidden_types'] ?? [], true );
 }
 function get_permalink( $id ) {
 	$post = get_post( $id );
@@ -143,8 +150,13 @@ function check_admin_referer( $action = -1, $query_arg = '_wpnonce' ) { return t
 function wp_nonce_field( $action = -1, $name = '_wpnonce' ) {}
 function checked( $checked, $current = true, $echo = true ) { return ''; }
 function selected( $selected, $current = true, $echo = true ) { return ''; }
-function wp_next_scheduled( $hook, $args = [] ) { return false; }
-function wp_schedule_single_event( $time, $hook, $args = [] ) { return true; }
+function wp_next_scheduled( $hook, $args = [] ) {
+	return empty( $GLOBALS['mdf_test']['scheduled'][ $hook ] ) ? false : time() + 3;
+}
+function wp_schedule_single_event( $time, $hook, $args = [] ) {
+	$GLOBALS['mdf_test']['scheduled'][ $hook ] = true;
+	return true;
+}
 function wp_schedule_event( $time, $recurrence, $hook ) { return true; }
 function wp_clear_scheduled_hook( $hook, $args = [] ) { return true; }
 function wp_doing_cron() { return false; }
@@ -164,9 +176,20 @@ function sanitize_key( $key ) { return strtolower( preg_replace( '/[^a-z0-9_\-]/
 function sanitize_title( $title ) { return strtolower( preg_replace( '/[^a-z0-9\-]/i', '-', (string) $title ) ); }
 function wp_strip_all_tags( $text ) { return strip_tags( (string) $text ); }
 function trailingslashit( $path ) { return rtrim( (string) $path, '/\\' ) . '/'; }
+function plugin_dir_path( $file ) { return rtrim( dirname( $file ), '/\\' ) . '/'; }
 
-class WP_Error {
-	private $code;
+#[AllowDynamicProperties]
+class WP_Post {
+	public $ID                = 0;
+	public $post_status       = 'publish';
+	public $post_password     = '';
+	public $post_type         = 'page';
+	public $post_title        = '';
+	public $post_content      = '';
+	public $post_modified_gmt = '2026-10-01 00:00:00';
+}
+
+class WP_Error {	private $code;
 	public function __construct( $code = '', $message = '', $data = null ) { $this->code = $code; }
 	public function get_error_code() { return $this->code; }
 	public function get_error_message() { return ''; }
@@ -245,7 +268,8 @@ $GLOBALS['wpdb'] = new MDF_Test_WPDB();
 // ---------------------------------------------------------------------------
 
 function mdf_test_add_post( int $id, array $overrides = [] ): void {
-	$post = (object) array_merge( [
+	$post = new WP_Post();
+	foreach ( array_merge( [
 		'ID'                => $id,
 		'post_status'       => 'publish',
 		'post_password'     => '',
@@ -253,7 +277,9 @@ function mdf_test_add_post( int $id, array $overrides = [] ): void {
 		'post_title'        => 'Post ' . $id,
 		'post_content'      => 'Body ' . $id,
 		'post_modified_gmt' => '2026-10-01 00:00:00',
-	], $overrides );
+	], $overrides ) as $key => $value ) {
+		$post->$key = $value;
+	}
 	$GLOBALS['mdf_test']['posts'][ $id ] = $post;
 }
 

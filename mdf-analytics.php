@@ -359,9 +359,16 @@ function mdf_list_cached_post_ids(): array {
         return [];
     }
     $ids = [];
+    $excluded = mdf_excluded_page_ids();
     foreach ( scandir( $posts_dir ) as $entry ) {
         if ( substr( $entry, -3 ) === '.md' ) {
-            $ids[] = (int) basename( $entry, '.md' );
+            $id = (int) basename( $entry, '.md' );
+            // Transactional pages never count as cached markdown, even if a
+            // stale file is still on disk.
+            if ( in_array( $id, $excluded, true ) ) {
+                continue;
+            }
+            $ids[] = $id;
         }
     }
     return $ids;
@@ -387,6 +394,14 @@ function mdf_convert_post( int $post_id ): bool {
     $post = get_post( $post_id );
     if ( ! $post || $post->post_status !== 'publish' ) {
         mdf_manifest_record_result( $post_id, false );
+        return false;
+    }
+
+    // Objects that must never be offered get no variant at all. Any variant
+    // left behind by an earlier version is removed here, so it can be neither
+    // served nor listed.
+    if ( mdf_excluded_from_markdown( $post_id ) ) {
+        mdf_delete_cached_variant( $post_id );
         return false;
     }
 
@@ -562,6 +577,10 @@ function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
     if ( wp_is_post_revision( $post_id ) ) return;
     if ( $post->post_status !== 'publish' ) return;
 
+    // Transactional pages (and other never-offerable objects) are never
+    // enqueued for rebuild.
+    if ( mdf_excluded_from_markdown( $post_id ) ) return;
+
     // Only act if markdown offering is enabled.
     if ( ! get_option( 'mdf_offer_markdown', false ) ) return;
 
@@ -627,6 +646,197 @@ function mdf_schedule_post_rebuild( int $post_id ): void {
 }
 
 // ---------------------------------------------------------------------------
+// Exclusion — objects that must never be offered as markdown
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether WooCommerce provides its front-end pages on this site.
+ */
+function mdf_woocommerce_active(): bool {
+    return function_exists( 'wc_get_page_id' ) || class_exists( 'WooCommerce' );
+}
+
+/**
+ * Page IDs that must never be converted, cached or served as markdown.
+ *
+ * Resolved from stored state only, never from the request: conversion, the
+ * backfill, save_post and WP-Cron have no query to ask is_cart() /
+ * is_checkout() / is_account_page() about.
+ *
+ * Three sources, because a page can be relocated:
+ *   1. WooCommerce's configured page IDs;
+ *   2. the raw woocommerce_*_page_id options (WooCommerce inactive, pages kept);
+ *   3. any published page whose body carries the cart, checkout or account
+ *      shortcode or block, so a relocated page is caught as well.
+ *
+ * The shop page is included deliberately. It is a product archive rendered by
+ * the query loop, not a document: its stored body is empty, so its markdown
+ * variant is a zero-byte file (WordPress-CJ had exactly that), and a snapshot
+ * of a changing listing would go stale regardless.
+ *
+ * @return int[]
+ */
+function mdf_excluded_page_ids(): array {
+    static $ids = null;
+
+    if ( null !== $ids ) {
+        return $ids;
+    }
+
+    $ids = [];
+
+    if ( ! mdf_woocommerce_active() ) {
+        return $ids;
+    }
+
+    $candidates = [];
+
+    if ( function_exists( 'wc_get_page_id' ) ) {
+        foreach ( [ 'cart', 'checkout', 'myaccount', 'shop' ] as $key ) {
+            $candidates[] = (int) wc_get_page_id( $key );
+        }
+    }
+
+    foreach ( [ 'woocommerce_cart_page_id', 'woocommerce_checkout_page_id', 'woocommerce_myaccount_page_id', 'woocommerce_shop_page_id' ] as $option ) {
+        $candidates[] = (int) get_option( $option, 0 );
+    }
+
+    global $wpdb;
+
+    $patterns = [
+        '[woocommerce_cart',
+        '[woocommerce_checkout',
+        '[woocommerce_my_account',
+        'wp:woocommerce/cart',
+        'wp:woocommerce/checkout',
+    ];
+
+    $likes = [];
+    foreach ( $patterns as $pattern ) {
+        $likes[] = $wpdb->prepare( 'post_content LIKE %s', '%' . $wpdb->esc_like( $pattern ) . '%' );
+    }
+
+    $sql = "SELECT ID FROM {$wpdb->posts} WHERE post_type = 'page' AND post_status = 'publish' AND ( " . implode( ' OR ', $likes ) . ' )';
+
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
+    foreach ( (array) $wpdb->get_col( $sql ) as $row ) {
+        $candidates[] = (int) $row;
+    }
+
+    $candidates = array_values( array_unique( array_filter( $candidates, static function ( $id ) {
+        return (int) $id > 0;
+    } ) ) );
+
+    $ids = $candidates;
+
+    return $ids;
+}
+
+/**
+ * Whether a page is one of the excluded transactional pages.
+ */
+function mdf_is_excluded_page( int $post_id ): bool {
+    if ( $post_id <= 0 ) {
+        return false;
+    }
+
+    return in_array( $post_id, mdf_excluded_page_ids(), true );
+}
+
+/**
+ * Whether an object must never have a cached markdown variant, judged without
+ * any request context (conversion, backfill, save_post, WP-Cron).
+ *
+ * Covers the transactional-page exclusion plus objects that were never
+ * offerable in the first place: not published, password-protected, or of a
+ * post type that is not publicly viewable.
+ */
+function mdf_excluded_from_markdown( int $post_id ): bool {
+    if ( $post_id <= 0 ) {
+        return true;
+    }
+
+    if ( mdf_is_excluded_page( $post_id ) ) {
+        return true;
+    }
+
+    $post = get_post( $post_id );
+    if ( ! $post instanceof \WP_Post ) {
+        return true;
+    }
+    if ( 'publish' !== $post->post_status ) {
+        return true;
+    }
+    if ( ! empty( $post->post_password ) ) {
+        return true;
+    }
+    if ( function_exists( 'is_post_type_viewable' ) && ! is_post_type_viewable( $post->post_type ) ) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Whether the current request is a WooCommerce transactional view: the cart,
+ * checkout (including its order-pay and order-received endpoints), the account
+ * area (including every account endpoint) or any other WooCommerce endpoint.
+ *
+ * Request-scoped only — this cannot be used from conversion or WP-Cron.
+ */
+function mdf_is_woocommerce_transactional_request(): bool {
+    if ( ! mdf_woocommerce_active() ) {
+        return false;
+    }
+    if ( function_exists( 'is_cart' ) && is_cart() ) {
+        return true;
+    }
+    if ( function_exists( 'is_checkout' ) && is_checkout() ) {
+        return true;
+    }
+    if ( function_exists( 'is_account_page' ) && is_account_page() ) {
+        return true;
+    }
+    if ( function_exists( 'is_wc_endpoint_url' ) && is_wc_endpoint_url() ) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Whether another component has already declared this response uncacheable.
+ *
+ * The bundled WP Super Cache adapter defines DONOTCACHEPAGE on every markdown
+ * request — that is how it bypasses the page cache — so the constant alone
+ * carries no information about intent. The adapter also defines
+ * MDF_WPSC_MARKDOWN_BYPASS in the same step; when that marker is present the
+ * constant is ours and is ignored. Otherwise the constant came from a plugin,
+ * a theme or wp-config, and a page the site has declared uncacheable is not
+ * offered as a markdown variant either.
+ */
+function mdf_third_party_no_cache(): bool {
+    return defined( 'DONOTCACHEPAGE' ) && ! defined( 'MDF_WPSC_MARKDOWN_BYPASS' );
+}
+
+/**
+ * Delete the cached markdown variant (body and sidecar) for an object.
+ *
+ * @return bool True when at least one file was removed.
+ */
+function mdf_delete_cached_variant( int $post_id ): bool {
+    $removed = false;
+
+    foreach ( [ mdf_cache_posts_dir() . '/' . $post_id . '.md', mdf_sidecar_path( $post_id ) ] as $path ) {
+        if ( file_exists( $path ) && @unlink( $path ) ) {
+            $removed = true;
+        }
+    }
+
+    return $removed;
+}
+
+// ---------------------------------------------------------------------------
 // Negotiation gating — serve cached markdown on Accept: text/markdown
 // ---------------------------------------------------------------------------
 
@@ -656,6 +866,21 @@ function mdf_maybe_serve_markdown(): void {
     // Check Accept header for text/markdown.
     $accept = isset( $_SERVER['HTTP_ACCEPT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_ACCEPT'] ) ) : '';
     if ( stripos( $accept, 'text/markdown' ) === false ) return;
+
+    // Never offer markdown for an object that must stay HTML-only: WooCommerce
+    // transactional views (cart, checkout and its order-pay/order-received
+    // endpoints, the account area and its endpoints — checked by request
+    // conditionals AND by page ID), objects excluded by policy (password-
+    // protected, non-public), or a response another component has already
+    // declared uncacheable. All of them fall through to normal HTML, which is
+    // what the MDF spec requires where no markdown representation exists.
+    if (
+        mdf_is_woocommerce_transactional_request()
+        || mdf_excluded_from_markdown( $post_id )
+        || mdf_third_party_no_cache()
+    ) {
+        return;
+    }
 
     // Fast filesystem stat — do NOT read or parse the .meta.json sidecar.
     $md_path = mdf_cache_posts_dir() . '/' . $post_id . '.md';
@@ -1293,6 +1518,11 @@ function mdf_start_backfill(): void {
         'suppress_filters' => true,
     ] );
 
+    // Transactional pages and other never-offerable objects are never queued.
+    $post_ids = array_values( array_filter( $post_ids, static function ( $id ) {
+        return ! mdf_excluded_from_markdown( (int) $id );
+    } ) );
+
     $total = count( $post_ids );
     if ( $total === 0 ) return;
 
@@ -1922,7 +2152,24 @@ function mdf_get_servable_llms_txt(): array {
         $effective['content'] = mdf_llms_txt_without_negotiation_claim( $effective['content'] );
     }
 
+    // A site that serves some pages as HTML only must not imply otherwise.
+    if ( ! $effective['custom'] && mdf_negotiation_claim_confirmed() && ! empty( mdf_excluded_page_ids() ) ) {
+        $effective['content'] = rtrim( $effective['content'] ) . "\n" . mdf_llms_txt_session_only_note();
+    }
+
     return $effective;
+}
+
+/**
+ * llms.txt section for sites with pages that are HTML-only by design.
+ *
+ * The bundled claim says markdown is available for a page URL; on a
+ * WooCommerce site that is not true for the cart, checkout or account pages,
+ * so the served file states the exception instead of implying it.
+ */
+function mdf_llms_txt_session_only_note(): string {
+    return "\n## Session-only pages\n\n"
+        . 'Pages that need a shopper session — the cart, checkout and account pages, and their endpoints — are served as HTML only and never as markdown.';
 }
 
 function mdf_serve_llms_txt(): void {

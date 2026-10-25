@@ -99,6 +99,28 @@ register_shutdown_function( 'mdf_test_server_stop' );
  *
  * @return array{body:string,status:int,headers:string[]}
  */
+/**
+ * Run the in-process state checks (exclusion resolution, listing, conversion,
+ * backfill queue, llms.txt) in a fresh PHP process.
+ */
+function run_state_case( array $spec ): array {
+	$spec_file = tempnam( sys_get_temp_dir(), 'mdfstate' );
+	file_put_contents( $spec_file, json_encode( $spec ) );
+	$cmd    = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( __DIR__ . '/state_case.php' ) . ' ' . escapeshellarg( $spec_file );
+	$output = (string) shell_exec( $cmd );
+	@unlink( $spec_file );
+	$data = json_decode( $output, true );
+	if ( ! is_array( $data ) ) {
+		return [ 'error' => $output ];
+	}
+	return $data;
+}
+
+/**
+ * Issue one request against a serve-case spec.
+ *
+ * @return array{body:string,status:int,headers:string[]}
+ */
 function run_serve_case( array $spec ): array {
 	$port = mdf_test_server_start();
 
