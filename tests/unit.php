@@ -241,4 +241,88 @@ if ( isset( $up['error'] ) ) {
 }
 
 
+// ---------------------------------------------------------------------------
+group( 'self-test: negative probes on transactional URLs' );
+// ---------------------------------------------------------------------------
+
+$woo_base = [
+	'woo_pages' => $woo_pages,
+	'posts'     => [
+		9  => [],
+		10 => [ 'permalink' => 'https://example.test/cart/' ],
+		11 => [ 'permalink' => 'https://example.test/checkout/' ],
+		12 => [ 'permalink' => 'https://example.test/my-account/' ],
+		21 => [ 'post_type' => 'product', 'permalink' => 'https://example.test/product/thing/' ],
+	],
+	'list_md'   => [ 21 => 90 ],
+	'selftest'  => true,
+];
+
+// Exclusions broken: the cart answers markdown.
+$broken = $woo_base;
+$broken['http'] = [
+	'https://example.test/product/thing/|'          => 'text/html',
+	'https://example.test/product/thing/|gzip'      => 'text/markdown',
+	'https://example.test/product/thing/|identity'  => 'text/markdown',
+	'https://example.test/cart/|gzip'               => 'text/markdown',
+	'https://example.test/cart/|identity'           => 'text/markdown',
+	'https://example.test/checkout/|gzip'           => 'text/html',
+	'https://example.test/checkout/|identity'       => 'text/html',
+	'https://example.test/my-account/|gzip'         => 'text/html',
+	'https://example.test/my-account/|identity'     => 'text/html',
+	'https://example.test/my-account/orders/|gzip'  => 'text/html',
+	'https://example.test/my-account/orders/|identity' => 'text/html',
+];
+$r = run_state_case( $broken );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'self-test (exclusion broken) ran', (string) $r['error'] );
+} else {
+	same( [ 'https://example.test/product/thing/' ], $r['test_urls'], 'positive probes skip the transactional pages' );
+	same( 4, count( $r['excluded_urls'] ), 'negative probes cover cart, checkout, account and one account endpoint' );
+	same( 'blocked', $r['selftest']['status'], 'markdown on a transactional URL reports blocked' );
+	ok( false !== strpos( $r['selftest']['detail'], 'Excluded URL probes returned markdown' ), 'blocked detail names the excluded-URL failure' );
+}
+
+// Exclusion working: transactional URLs answer HTML.
+$good = $woo_base;
+$good['http'] = [
+	'https://example.test/product/thing/|'             => 'text/html',
+	'https://example.test/product/thing/|gzip'         => 'text/markdown',
+	'https://example.test/product/thing/|identity'     => 'text/markdown',
+	'https://example.test/cart/|gzip'                  => 'text/html',
+	'https://example.test/cart/|identity'              => 'text/html',
+	'https://example.test/checkout/|gzip'              => 'text/html',
+	'https://example.test/checkout/|identity'          => 'text/html',
+	'https://example.test/my-account/|gzip'            => 'text/html',
+	'https://example.test/my-account/|identity'        => 'text/html',
+	'https://example.test/my-account/orders/|gzip'     => 'text/html',
+	'https://example.test/my-account/orders/|identity' => 'text/html',
+];
+$r = run_state_case( $good );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'self-test (exclusion working) ran', (string) $r['error'] );
+} else {
+	same( 'working', $r['selftest']['status'], 'exclusion in place keeps the self-test working' );
+	ok( false !== strpos( $r['selftest']['detail'], 'excluded URL probe(s)' ), 'working detail reports the negative probes' );
+}
+
+// Non-Woo: no negative probes at all.
+$r = run_state_case( [
+	'posts'    => [ 21 => [ 'permalink' => 'https://example.test/post-21/' ] ],
+	'list_md'  => [ 21 => 90 ],
+	'selftest' => true,
+	'http'     => [
+		'https://example.test/post-21/|'          => 'text/html',
+		'https://example.test/post-21/|gzip'      => 'text/markdown',
+		'https://example.test/post-21/|identity'  => 'text/markdown',
+	],
+] );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'self-test (non-Woo) ran', (string) $r['error'] );
+} else {
+	same( [], $r['excluded_urls'], 'non-Woo site has no negative probes' );
+	same( 'working', $r['selftest']['status'], 'non-Woo self-test still reports working' );
+	same( 'All 2 probe(s) returned text/markdown.', $r['selftest']['detail'], 'non-Woo detail is unchanged from 0.1.13' );
+}
+
 exit( summary() );

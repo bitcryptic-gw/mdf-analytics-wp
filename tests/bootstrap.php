@@ -121,7 +121,13 @@ function is_post_type_viewable( $type ) {
 }
 function get_permalink( $id ) {
 	$post = get_post( $id );
-	return $post ? 'https://example.test/?p=' . (int) $id : false;
+	if ( ! $post ) {
+		return false;
+	}
+	if ( ! empty( $post->permalink ) ) {
+		return $post->permalink;
+	}
+	return 'https://example.test/post-' . (int) $id . '/';
 }
 function home_url( $path = '/' ) { return 'https://example.test' . $path; }
 function admin_url( $path = '' ) { return 'https://example.test/wp-admin/' . $path; }

@@ -1269,6 +1269,105 @@ function mdf_summarize_negotiation_probe( array $r, int $checked ): array {
 }
 
 /**
+ * Probe URLs that must never answer with markdown: WooCommerce's cart,
+ * checkout and account pages, plus one account endpoint (which also exercises
+ * the endpoint handling rather than the page ID alone).
+ *
+ * @return string[]
+ */
+function mdf_negotiation_excluded_urls(): array {
+    if ( ! mdf_woocommerce_active() ) {
+        return [];
+    }
+
+    $urls = [];
+
+    foreach ( [ 'cart', 'checkout', 'myaccount' ] as $key ) {
+        $id = function_exists( 'wc_get_page_id' )
+            ? (int) wc_get_page_id( $key )
+            : (int) get_option( 'woocommerce_' . $key . '_page_id', 0 );
+
+        if ( $id <= 0 ) {
+            continue;
+        }
+
+        $permalink = get_permalink( $id );
+        if ( is_string( $permalink ) && '' !== $permalink && ! in_array( $permalink, $urls, true ) ) {
+            $urls[] = $permalink;
+        }
+    }
+
+    if ( ! empty( $urls ) && function_exists( 'wc_get_account_endpoint_url' ) ) {
+        $endpoint = wc_get_account_endpoint_url( 'orders' );
+        if ( is_string( $endpoint ) && '' !== $endpoint && ! in_array( $endpoint, $urls, true ) ) {
+            $urls[] = $endpoint;
+        }
+    }
+
+    return $urls;
+}
+
+/**
+ * Negative probes: request excluded URLs as markdown and count any markdown
+ * answer. Any 200 that comes back as markdown means the exclusion is broken,
+ * so the self-test must report `blocked` and the claim stays withheld.
+ *
+ * A non-200 (e.g. the empty-cart redirect on /checkout/) is not evidence of a
+ * markdown answer and is recorded as a note only.
+ *
+ * @param string[] $urls
+ * @return array{probes:int,markdown:int,markdown_hits:string[],notes:string[]}
+ */
+function mdf_probe_excluded_urls( array $urls ): array {
+    $result = [
+        'probes'        => 0,
+        'markdown'      => 0,
+        'markdown_hits' => [],
+        'notes'         => [],
+    ];
+
+    foreach ( $urls as $url ) {
+        foreach ( [ 'gzip', 'identity' ] as $encoding ) {
+            $label = $url . ' (' . $encoding . ')';
+
+            $response = wp_remote_get(
+                $url,
+                [
+                    'timeout'     => 5,
+                    'redirection' => 0,
+                    'headers'     => [
+                        'Accept'          => 'text/markdown',
+                        'Accept-Encoding' => $encoding,
+                    ],
+                    'user-agent'  => 'MDF-Analytics-SelfTest/' . MDF_VERSION,
+                ]
+            );
+
+            if ( is_wp_error( $response ) ) {
+                $result['notes'][] = 'excluded probe failed for ' . $label . ' (' . $response->get_error_code() . ')';
+                continue;
+            }
+
+            $code = (int) wp_remote_retrieve_response_code( $response );
+            if ( 200 !== $code ) {
+                $result['notes'][] = 'excluded probe returned HTTP ' . $code . ' for ' . $label;
+                continue;
+            }
+
+            $result['probes']++;
+
+            $ctype = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
+            if ( false !== strpos( $ctype, 'text/markdown' ) ) {
+                $result['markdown']++;
+                $result['markdown_hits'][] = $label;
+            }
+        }
+    }
+
+    return $result;
+}
+
+/**
  * Perform the negotiation self-test.
  *
  * Probes up to three qualifying URLs (front page first, then most recently
@@ -1311,7 +1410,37 @@ function mdf_perform_negotiation_self_test(): array {
         $result = mdf_probe_negotiation_urls( $urls );
     }
 
-    return mdf_summarize_negotiation_probe( $result, $checked );
+    $summary = mdf_summarize_negotiation_probe( $result, $checked );
+
+    // Negative probes: transactional pages must never answer markdown. A
+    // markdown answer there is proof the exclusion is broken, so the claim is
+    // withheld regardless of what the positive probes found.
+    $excluded_urls = mdf_negotiation_excluded_urls();
+    if ( ! empty( $excluded_urls ) ) {
+        $negative = mdf_probe_excluded_urls( $excluded_urls );
+
+        if ( $negative['markdown'] > 0 ) {
+            $hits = implode( ', ', array_slice( array_unique( $negative['markdown_hits'] ), 0, 3 ) );
+
+            return [
+                'status'  => 'blocked',
+                'checked' => $checked,
+                'detail'  => sprintf(
+                    'Excluded URL probes returned markdown (%s) — cart, checkout and account pages must be HTML only.',
+                    $hits
+                ),
+            ];
+        }
+
+        if ( 'working' === $summary['status'] ) {
+            $summary['detail'] .= sprintf(
+                ' %d excluded URL probe(s) returned no markdown, as required.',
+                $negative['probes']
+            );
+        }
+    }
+
+    return $summary;
 }
 
 /**

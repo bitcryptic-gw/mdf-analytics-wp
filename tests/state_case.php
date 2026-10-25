@@ -86,6 +86,21 @@ if ( ! empty( $spec['upgrade_md'] ) ) {
 	];
 }
 
+if ( ! empty( $spec['selftest'] ) ) {
+	foreach ( (array) ( $spec['http'] ?? [] ) as $key => $ctype ) {
+		$GLOBALS['mdf_test']['http_queue'][ $key ][] = [
+			'response' => [ 'code' => 200 ],
+			'headers'  => [ 'content-type' => $ctype ],
+			'body'     => '',
+		];
+	}
+	$GLOBALS['mdf_test']['options']['mdf_offer_markdown'] = true;
+	$out['test_urls']     = mdf_negotiation_test_urls( 3 );
+	$out['excluded_urls'] = mdf_negotiation_excluded_urls();
+	$out['selftest']      = mdf_perform_negotiation_self_test();
+	$out['http_calls']    = count( $GLOBALS['mdf_test']['http'] );
+}
+
 if ( ! empty( $spec['llms'] ) ) {
 	$GLOBALS['mdf_test']['options']['mdf_offer_markdown']     = true;
 	$GLOBALS['mdf_test']['options']['mdf_negotiation_status'] = [ 'status' => 'working', 'checked' => time(), 'detail' => '' ];
