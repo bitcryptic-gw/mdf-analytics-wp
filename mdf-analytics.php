@@ -639,6 +639,13 @@ function mdf_schedule_post_rebuild( int $post_id ): void {
  * file actually exists for it.  No live-conversion fallback.
  */
 function mdf_maybe_serve_markdown(): void {
+    // Only a singular object can have a markdown variant. Archives are not
+    // documents: on a term archive get_queried_object_id() returns the TERM id,
+    // which shares no namespace with post IDs, so a term whose id happens to
+    // match a cached post would otherwise be answered with that unrelated
+    // post's markdown. Anything non-singular falls through to normal HTML.
+    if ( ! is_singular() ) return;
+
     // Must be a singular post/page/CPT (get_queried_object_id returns 0 otherwise).
     $post_id = get_queried_object_id();
     if ( $post_id <= 0 ) return;
@@ -659,6 +666,12 @@ function mdf_maybe_serve_markdown(): void {
 
     $size = filesize( $md_path );
     if ( $size === false ) return;
+
+    // A zero-byte variant is not a variant. Stored .md files can be empty when
+    // the object's body renders to nothing (a product-archive page, for one);
+    // answering an agent with 200 text/markdown and no content is worse than
+    // answering with the normal HTML, so fall through to HTML instead.
+    if ( $size <= 0 ) return;
 
     // Conditional GET support.
     $if_mod = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
