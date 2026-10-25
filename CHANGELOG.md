@@ -12,6 +12,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-25
+
+### Added
+- **WooCommerce transactional pages are never offered as markdown.** The cart,
+  checkout (including `order-pay` and `order-received` endpoints) and account
+  area (including every account endpoint) are excluded at every point where a
+  page can become markdown: conversion, the backfill queue, `save_post`
+  rebuilds, the cached-ID listing and the manifest, and serving. Serving
+  refuses on request conditionals (`is_cart()`, `is_checkout()`,
+  `is_account_page()`, `is_wc_endpoint_url()`) **and** on page ID, and
+  conversion/backfill/WP-Cron — which have no request — exclude by page ID
+  from `wc_get_page_id()` plus the raw `woocommerce_*_page_id` options plus a
+  content scan for any published page carrying the cart, checkout or account
+  shortcode or block, so a relocated page is caught too. The shop page is
+  excluded as well: it is a product archive whose stored body is empty.
+- **Self-test negative probes.** On a WooCommerce site the self-test also
+  requests the cart, checkout and account URLs and one account endpoint in
+  both cache-key encodings with `Accept: text/markdown`. Any markdown answer
+  reports `blocked`, naming the URL and encoding, so the `llms.txt` claim stays
+  withheld.
+- **Upgrade cleanup (0.1.13 → 0.1.14).** Activation removes already-cached
+  `.md` files and sidecars for excluded pages, prunes their manifest
+  bookkeeping, recounts `post_count`, and records what it removed in the
+  manifest and in the `mdf_exclusion_cleanup` option.
+- **`llms.txt` exception notice.** On a WooCommerce site whose claim is
+  published, the served file states that session-only pages are HTML-only.
+- `tests/` — a stub harness plus PHP built-in server tests (no PHPUnit, no
+  WordPress install needed): `php tests/unit.php`.
+
+### Fixed
+- **Archives could be answered with an unrelated post's markdown.** The serve
+  path trusted `get_queried_object_id()` without `is_singular()`, so a term
+  archive whose term ID collided with a cached post ID returned that post's
+  body as `text/markdown` with `Vary: Accept` (reproduced live on WordPress-CJ:
+  `/category/uncategorized/` served post 1). Non-singular requests now fall
+  through to normal HTML.
+- **Zero-byte variants are no longer served.** An object whose body converts to
+  nothing (the WooCommerce shop page, for one) answered `200 text/markdown`
+  with an empty body; it now falls through to HTML.
+
+### Notes
+- Excluded pages answer a markdown request with their normal HTML and no MDF
+  `Vary: Accept`, which is what the MDF specification requires where no
+  markdown representation exists.
+- Password-protected objects, post types that are not publicly viewable, and a
+  third-party `DONOTCACHEPAGE` are also never offered. The bundled adapter
+  defines `MDF_WPSC_MARKDOWN_BYPASS` alongside its own `DONOTCACHEPAGE` so that
+  its deliberate define is not mistaken for a third-party one.
+- Non-WooCommerce sites are unaffected: identical output, 1161-byte `llms.txt`
+  with the same sha, no negative probes.
+
+
 ## [0.1.13] - 2026-09-20
 
 ### Fixed

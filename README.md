@@ -110,6 +110,14 @@ Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics 
 
 Since v0.1.4, the plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
 
+Only a **singular** object has a markdown variant: archives and other non-singular views always receive their normal HTML, because an archive's queried object ID is a term ID and could otherwise be mistaken for a cached post. A variant that converts to nothing (zero bytes) is not served either.
+
+### Transactional pages (WooCommerce)
+
+Since v0.1.14, on a WooCommerce site the cart, checkout (with its `order-pay` and `order-received` endpoints) and account area (with every account endpoint) are **never** offered as markdown. They are excluded from conversion, the backfill, `save_post` rebuilds, the cached-ID listing and the manifest, and from serving — by request conditional and by page ID. A relocated page is caught by scanning page content for the cart/checkout/account shortcode or block. The shop page is excluded as well: its body is empty and its listing is generated at request time. An excluded page answers a markdown request with its normal HTML and no `Vary: Accept`, which is what the MDF specification requires where no markdown representation exists.
+
+On upgrade from 0.1.13 the activation hook deletes any `.md` file already cached for those pages and records what it removed in the `mdf_exclusion_cleanup` option.
+
 Conversion is handled by the vendored `league/html-to-markdown` library.
 
 ### Known limitations
@@ -166,6 +174,20 @@ MDF (Markdown First) is an open web standards proposal that makes AI agents firs
 - **Live demo:** [mdf-demo.bitcryptic.com](https://mdf-demo.bitcryptic.com)
 
 ---
+
+## Tests
+
+`tests/` runs without PHPUnit and without a WordPress install: WordPress
+functions are stubbed, and the serve path is exercised through PHP's built-in
+web server so real response headers can be asserted.
+
+```bash
+php tests/unit.php
+```
+
+For an end-to-end check against a real WordPress + WooCommerce + WP Super Cache,
+run the throwaway Docker stack described in the task record for the release you
+are testing.
 
 ## Changelog
 
