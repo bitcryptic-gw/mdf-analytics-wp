@@ -38,7 +38,8 @@ jobs:
             mdf-analytics/composer.json \
             mdf-analytics/composer.lock \
             mdf-analytics/scoper.inc.php \
-            mdf-analytics/screenshots
+            mdf-analytics/screenshots \
+            mdf-analytics/tests
 
       - name: Build zip
         run: |
@@ -69,7 +70,7 @@ jobs:
           test -f verify/mdf-analytics/vendor/autoload.php || {
             echo "::error::missing vendor/autoload.php in ${ZIP}"; exit 1;
           }
-          for p in .github boot build-vendor.sh composer.json composer.lock scoper.inc.php screenshots; do
+          for p in .github boot build-vendor.sh composer.json composer.lock scoper.inc.php screenshots tests; do
             if [ -e "verify/mdf-analytics/${p}" ]; then
               echo "::error::excluded path present in zip: ${p}"; exit 1;
             fi
