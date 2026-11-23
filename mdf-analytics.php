@@ -3,9 +3,10 @@
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Serves clean markdown to AI agents that request it and shows which agents are visiting — free today, with paid markdown over x402 planned.
- * Version:     0.1.14
+ * Version:     0.1.15
  * Requires at least: 6.0
  * Requires PHP: 8.0
+ * Tested up to: 7.1
  * Author:      BitCryptic™ and Slepner
  * Author URI:  https://markdownfirst.com/
  * License:     MIT
@@ -18,7 +19,7 @@ defined( 'ABSPATH' ) || exit;
 // Constants
 // ---------------------------------------------------------------------------
 
-define( 'MDF_VERSION',    '0.1.14' );
+define( 'MDF_VERSION',    '0.1.15' );
 define( 'MDF_TABLE',      'mdf_requests' );
 define( 'MDF_LOG_DAYS',   90 );       // retention window
 define( 'MDF_PURGE_FREQ', 'daily' );  // WP-Cron schedule
