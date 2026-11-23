@@ -1574,6 +1574,45 @@ function mdf_schedule_negotiation_self_test(): void {
     }
 }
 
+/**
+ * One delayed re-test, at most once, after an activation that registered the
+ * WP Super Cache adapter and still measured `blocked`.
+ *
+ * Registering the adapter rewrites `wp-cache-config.php`. An Apache worker
+ * holding the stale compiled copy serves one more cached HTML page, so the
+ * inline activation self-test can report `blocked` on a site that is already
+ * working — observed on 4 of 9 sites in the 0.1.14 rollout, with a manual
+ * re-run ~3 s later returning `working`. Now that /mdf.json is gated on the
+ * same result, that transient would withhold the capability document for a
+ * day, so give it one automatic re-check about a minute later.
+ *
+ * Never loops: this schedules a single event, and the handler it runs never
+ * schedules another. A genuine `blocked` stays blocked after the re-check.
+ */
+function mdf_schedule_delayed_negotiation_retest(): void {
+    if ( wp_next_scheduled( 'mdf_negotiation_delayed_retest' ) ) {
+        return;
+    }
+
+    // Same verify-after-schedule pattern as the backfill: a single-event cron
+    // write can be lost to a race with another scheduler. One retry, then log.
+    wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'mdf_negotiation_delayed_retest' );
+    if ( ! wp_next_scheduled( 'mdf_negotiation_delayed_retest' ) ) {
+        wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'mdf_negotiation_delayed_retest' );
+        if ( ! wp_next_scheduled( 'mdf_negotiation_delayed_retest' ) ) {
+            error_log( 'MDF Analytics: delayed negotiation re-test not scheduled after retry — the result of the activation self-test stands.' );
+        }
+    }
+}
+
+/**
+ * Run the delayed re-test. Deliberately does not schedule anything.
+ */
+function mdf_run_delayed_negotiation_self_test(): void {
+    mdf_run_negotiation_self_test();
+}
+add_action( 'mdf_negotiation_delayed_retest', 'mdf_run_delayed_negotiation_self_test' );
+
 // ---------------------------------------------------------------------------
 // Bundled WP Super Cache adapter
 //
@@ -1653,16 +1692,23 @@ function mdf_wpsc_adapter_registered(): bool {
  * Only when markdown offering is enabled and WP Super Cache is actually
  * caching. WP Super Cache itself records the path in its `wpsc_plugins`
  * setting (ABSPATH-relative), which is read during its early cache phase.
+ *
+ * @return bool True when this call is the one that registered the adapter.
  */
-function mdf_maybe_register_wpsc_adapter(): void {
+function mdf_maybe_register_wpsc_adapter(): bool {
     if ( ! get_option( 'mdf_offer_markdown', false ) ) {
-        return;
+        return false;
     }
     if ( ! mdf_wpsc_caching() || ! function_exists( 'wpsc_add_plugin' ) ) {
-        return;
+        return false;
+    }
+    if ( mdf_wpsc_adapter_registered() ) {
+        return false;
     }
 
     wpsc_add_plugin( mdf_wpsc_adapter_relative_path() );
+
+    return true;
 }
 
 /**
@@ -2057,11 +2103,19 @@ function mdf_activate(): void {
     // Register the WP Super Cache adapter when markdown offering is already on
     // (e.g. reactivation after an update). The admin-load self-heal handles the
     // upgrade path, where the activation hook does not run.
-    mdf_maybe_register_wpsc_adapter();
+    $adapter_just_registered = mdf_maybe_register_wpsc_adapter();
 
     // Record an initial negotiation status. Bounded by the self-test timeout
     // and never fatal on failure.
-    mdf_run_negotiation_self_test();
+    $result = mdf_run_negotiation_self_test();
+
+    // A `blocked` right after the adapter was registered is the known stale
+    // compiled-config transient: one Apache worker still serves the cached
+    // HTML page. Give it one delayed re-check rather than leaving /mdf.json
+    // withheld for a day over it. A genuine block survives the re-check.
+    if ( 'blocked' === $result['status'] && $adapter_just_registered ) {
+        mdf_schedule_delayed_negotiation_retest();
+    }
 
     // If the site already has a static llms.txt in the web root, it shadows the
     // plugin's virtual copy (the web server serves it before WordPress boots).
@@ -2082,6 +2136,7 @@ function mdf_deactivate(): void {
     // Deactivation is a deliberate no-op for llms.txt and cache state.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
     wp_clear_scheduled_hook( 'mdf_negotiation_self_test' );
+    wp_clear_scheduled_hook( 'mdf_negotiation_delayed_retest' );
 
     // Remove the WP Super Cache adapter registration so a deactivated plugin
     // has no effect on caching.
@@ -2121,6 +2176,7 @@ function mdf_uninstall(): void {
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
     wp_clear_scheduled_hook( 'mdf_backfill_batch' );
     wp_clear_scheduled_hook( 'mdf_negotiation_self_test' );
+    wp_clear_scheduled_hook( 'mdf_negotiation_delayed_retest' );
 
     // Remove the WP Super Cache adapter registration.
     mdf_maybe_unregister_wpsc_adapter();
