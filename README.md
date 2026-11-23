@@ -32,13 +32,13 @@ The dashboard shows you:
 
 ## Installation
 
-The plugin is **multi-file** as of v0.1.4 — it ships a vendored, namespaced copy of `league/html-to-markdown` in `vendor/`, which `mdf-analytics.php` requires to load.
+The plugin is **multi-file** — it ships a vendored, namespaced copy of `league/html-to-markdown` in `vendor/`, which `mdf-analytics.php` requires to load.
 
 > **Do not** upload `mdf-analytics.php` on its own. Without the `vendor/` directory alongside it, WordPress will fatal-error on activation.
 
 ### Recommended: install from a packaged release
 
-1. Go to the [Releases page](https://github.com/bitcryptic-gw/mdf-analytics-wp/releases) and download the release asset for the version you want (e.g. `mdf-analytics-0.1.10.zip`). **Download the named release asset, not the auto-generated "Source code (zip)" link.**
+1. Go to the [Releases page](https://github.com/bitcryptic-gw/mdf-analytics-wp/releases) and download the release asset for the version you want (named `mdf-analytics-<version>.zip`). **Download the named release asset, not the auto-generated "Source code (zip)" link.**
 2. In your WordPress admin, go to **Plugins → Add New → Upload Plugin**.
 3. Upload the zip and click **Activate**.
 4. Find **MDF Analytics** in the left admin menu.
@@ -208,20 +208,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.14 | 2026-10-25 | Added: WooCommerce cart, checkout (with `order-pay`/`order-received`), account (with every account endpoint) and shop pages are never offered as markdown, with upgrade cleanup of any variant already cached. Added: self-test negative probes on those URLs in both encodings — any markdown answer reports `blocked`. Added: llms.txt "Session-only pages" section on Woo sites. Fixed: non-singular views (archives) could be answered with an unrelated post's markdown; zero-byte variants are no longer served. See [CHANGELOG.md](CHANGELOG.md). |
+| 0.1.13 | 2026-09-20 | Fixed: the WP Super Cache adapter is now a total bypass — on a markdown request it sets `$cache_enabled = false` and defines `DONOTCACHEPAGE`, so the request neither reads nor writes the page cache. The previous marker-keyed design could cache an HTML fallback under the markdown key and then serve it to later markdown requests. Fixed: self-test excludes query-string permalinks and probes both gzip and `identity` encodings. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.12 | 2026-09-20 | Fixed: the machine-readable `/llms.txt` claim is now published only when offering is enabled **and** negotiation is confirmed (self-test or owner override) — previously it was suppressed only on `blocked`, so offer-off sites published a false claim. Fixed: self-test URL selection now skips non-public post types, empty/missing `.md`, and unreachable URLs, probes up to three, and reports a markdown/HTML split as `blocked`. Added: owner confirmation override with a one-line per-state reason. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.11 | 2026-09-20 | Added: negotiation self-test (working/blocked/unknown) stored in `mdf_negotiation_status`; honest `/llms.txt` that drops the markdown-negotiation claim when blocked while never altering saved custom content; bundled WP Super Cache adapter registered by path via `wpsc_plugins`, fixing the reverse race in standard mode with an honest Expert (mod_rewrite) caveat. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.10 | 2026-09-19 | Added: in-admin llms.txt editor on the Settings page — content is stored in the database (option `mdf_llms_txt`) and survives plugin upgrades; the bundled file becomes the read-only default template; a static-webroot warning is shown in the editor. Changed: `/llms.txt` now serves the stored option when set, falling back to the bundled default otherwise. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.9 | 2026-09-01 | Fix: backfill and per-post rebuild recovery when the scheduled cron event is lost to a race with another scheduler — scheduling is now verified and retried, with a self-heal recheck on existing crons and admin page loads. Added: persistent markdown-coverage status line on the Settings page. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.8 | 2026-09-01 | Added: uninstall hook removes the DB table, markdown cache directory, plugin options, and scheduled events. Added: activation-time detection + dismissible admin notice for a pre-existing static `/llms.txt`, with a copy-paste "Machine-readable content" snippet. Changed: bundled `llms.txt` replaced with a generic owner-editable template. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.7 | 2026-07-16 | Fix: `DONOTCACHEPAGE` set before serving markdown, preventing WP Super Cache from sharing a cache key between markdown and HTML responses for the same URL. Fix: page-builder shortcode expansion (e.g. Divi) now works correctly in WP-Cron context. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.6 | 2026-07-16 | Fix: backfill no longer counts failed conversions as processed. Added: writability check + admin notice for the markdown cache directory. Roadmap copy updated — markdown generation is shipped, not Phase 3. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.4 | 2026-07-09 | Vendored, namespaced `league/html-to-markdown`. Pre-build markdown cache pipeline with negotiation gating and `file_exists()` gate. `flock(LOCK_EX)` manifest locking. Markdown serving goes live in this release. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.3 | 2026-06-10 | Added: plugin serves curated `llms.txt` at the site root (`/llms.txt`). Supports GET/HEAD, conditional requests, and 1-hour caching. Requests logged through existing classifier. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.2 | 2026-06-10 | Fix: known-agent snippets now show matched fragment (e.g. `Googlebot`) rather than raw UA prefix (`Mozilla`) |
-| 0.1.1 | 2026-06-09 | Fix: WordPress core, Jetpack, and uptime monitors correctly classified as internal/monitor and excluded from earnings |
-| 0.1.0 | 2026-06-08 | Initial release |
 
-There is no v0.1.5 — the version was skipped.
+Older releases (0.1.0 through 0.1.9) are listed in [CHANGELOG.md](CHANGELOG.md). There is no v0.1.5 — the version was skipped.
 
 ---
 
