@@ -231,9 +231,10 @@ web server so real response headers can be asserted.
 php tests/unit.php
 ```
 
-For an end-to-end check against a real WordPress + WooCommerce + WP Super Cache,
-run the throwaway Docker stack described in the task record for the release you
-are testing.
+The suite does not start WordPress, WooCommerce or a page cache, so it does not
+prove negotiation works end to end on any particular host. If you run a page
+cache, a CDN, or WooCommerce, check it on a staging copy of your own site first,
+then confirm with the [negotiation self-test](#negotiation-self-test).
 
 ---
 
