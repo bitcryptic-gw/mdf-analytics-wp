@@ -182,6 +182,7 @@ function sanitize_key( $key ) { return strtolower( preg_replace( '/[^a-z0-9_\-]/
 function sanitize_title( $title ) { return strtolower( preg_replace( '/[^a-z0-9\-]/i', '-', (string) $title ) ); }
 function wp_strip_all_tags( $text ) { return strip_tags( (string) $text ); }
 function trailingslashit( $path ) { return rtrim( (string) $path, '/\\' ) . '/'; }
+function untrailingslashit( $path ) { return rtrim( (string) $path, '/\\' ); }
 function plugin_dir_path( $file ) { return rtrim( dirname( $file ), '/\\' ) . '/'; }
 
 #[AllowDynamicProperties]

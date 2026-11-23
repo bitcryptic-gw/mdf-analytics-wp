@@ -37,6 +37,15 @@ define( 'MDF_OWNER_CONFIRMED_OPTION', 'mdf_negotiation_owner_confirmed' );
 // Anything larger is rejected outright rather than silently truncated.
 define( 'MDF_LLMS_TXT_MAX_BYTES', 65536 );
 
+// MDF specification version this plugin's capability document declares, and
+// the protocol-family version every MDF-layer response carries. They are
+// different numbers on purpose: the family stayed 1 across 0.3.x.
+define( 'MDF_SPEC_VERSION', '0.3.1' );
+define( 'MDF_PROTOCOL_VERSION', '1' );
+
+// Virtual capability document served at the site root, like /llms.txt.
+define( 'MDF_MDF_JSON_PATH', '/mdf.json' );
+
 // ---------------------------------------------------------------------------
 // Known agent User-Agent substrings (case-insensitive)
 // Sourced from Cloudflare bot management public lists + common crawlers.
@@ -987,6 +996,49 @@ function mdf_negotiation_owner_confirmed(): bool {
 }
 
 /**
+ * Why the site is not currently asserting MDF capability, as a short
+ * machine-readable reason, or '' when it is.
+ *
+ * One source of truth for three things that must never disagree: the
+ * machine-readable claim in the bundled llms.txt, the /mdf.json capability
+ * document, and the X-MDF-Version header. Offering off, `blocked`, and an
+ * un-overridden `unknown` all withhold; a blocked result is direct evidence
+ * and beats any earlier owner assertion.
+ */
+function mdf_negotiation_claim_block_reason(): string {
+    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
+        return 'offering_disabled';
+    }
+    if ( mdf_negotiation_is_blocked() ) {
+        return 'negotiation_blocked';
+    }
+    if ( mdf_negotiation_owner_confirmed() ) {
+        return '';
+    }
+    if ( mdf_get_negotiation_status()['status'] === 'working' ) {
+        return '';
+    }
+
+    return 'negotiation_unconfirmed';
+}
+
+/**
+ * A short human-readable form of the block reason, for admin copy.
+ */
+function mdf_negotiation_claim_reason_text(): string {
+    switch ( mdf_negotiation_claim_block_reason() ) {
+        case 'offering_disabled':
+            return 'markdown offering is off';
+        case 'negotiation_blocked':
+            return 'a page cache is serving HTML to agents';
+        case 'negotiation_unconfirmed':
+            return 'negotiation is not confirmed yet';
+    }
+
+    return '';
+}
+
+/**
  * Whether the bundled llms.txt may assert that the site serves markdown.
  *
  * Only when markdown offering is enabled AND negotiation is actually confirmed
@@ -994,18 +1046,7 @@ function mdf_negotiation_owner_confirmed(): bool {
  * Offering off, `blocked`, and un-overridden `unknown` all withhold the claim.
  */
 function mdf_negotiation_claim_confirmed(): bool {
-    if ( ! get_option( 'mdf_offer_markdown', false ) ) {
-        return false;
-    }
-    // A blocked result is direct evidence and beats any earlier owner assertion.
-    if ( mdf_negotiation_is_blocked() ) {
-        return false;
-    }
-    if ( mdf_negotiation_owner_confirmed() ) {
-        return true;
-    }
-
-    return mdf_get_negotiation_status()['status'] === 'working';
+    return mdf_negotiation_claim_block_reason() === '';
 }
 
 /**
@@ -1802,6 +1843,49 @@ function mdf_markdown_negotiation_snippet(): string {
     return "## Machine-readable content\n\nThis site serves clean markdown to AI agents on request. Send an `Accept: text/markdown` header when fetching any page URL to receive a CommonMark version instead of HTML, at the same URL. No separate endpoint or path change is needed.";
 }
 
+// ---------------------------------------------------------------------------
+// /mdf.json static-file detection notice
+//
+// Same reasoning as the llms.txt notice above: a real file in the web root is
+// served by the web server before WordPress boots, so it shadows the plugin's
+// virtual document. Detect it, say so, never touch it.
+// ---------------------------------------------------------------------------
+
+function mdf_refresh_static_mdf_json_detection(): void {
+    if ( file_exists( ABSPATH . 'mdf.json' ) ) {
+        update_option( 'mdf_static_mdf_json_detected', true );
+    } else {
+        delete_option( 'mdf_static_mdf_json_detected' );
+        delete_option( 'mdf_static_mdf_json_notice_dismissed' );
+    }
+}
+add_action( 'admin_init', 'mdf_refresh_static_mdf_json_detection' );
+
+function mdf_maybe_show_static_mdf_json_notice(): void {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+
+    if ( isset( $_GET['mdf_dismiss_static_mdf_json'] ) && check_admin_referer( 'mdf_dismiss_static_mdf_json' ) ) {
+        update_option( 'mdf_static_mdf_json_notice_dismissed', true );
+        return;
+    }
+
+    if ( ! get_option( 'mdf_static_mdf_json_detected', false ) ) return;
+    if ( get_option( 'mdf_static_mdf_json_notice_dismissed', false ) ) return;
+
+    $dismiss_url = add_query_arg( [
+        'mdf_dismiss_static_mdf_json' => 1,
+        '_wpnonce'                    => wp_create_nonce( 'mdf_dismiss_static_mdf_json' ),
+    ] );
+    ?>
+    <div class="notice notice-warning is-dismissible" data-dismiss-url="<?php echo esc_url( $dismiss_url ); ?>">
+        <p><strong>MDF Analytics: existing mdf.json detected</strong></p>
+        <p>Your site already has an <code>mdf.json</code> file at the web root, so your web server serves that file before WordPress runs and it takes priority over the capability document this plugin would otherwise publish. Nothing has been changed or overwritten, and the plugin never reads, edits or deletes that file.</p>
+        <p>If you want the plugin's own document instead, remove the file and the plugin's <code>/mdf.json</code> will be served when markdown negotiation is confirmed. The <a href="<?php echo esc_url( admin_url( 'admin.php?page=mdf-settings' ) ); ?>">Settings page</a> shows which document is live.</p>
+    </div>
+    <?php
+}
+add_action( 'admin_notices', 'mdf_maybe_show_static_mdf_json_notice' );
+
 function mdf_enqueue_copy_snippet_script(): void {
     $handle = 'mdf-copy-snippet';
     if ( wp_script_is( $handle, 'enqueued' ) ) return;
@@ -1933,6 +2017,12 @@ function mdf_activate(): void {
     if ( file_exists( ABSPATH . 'llms.txt' ) ) {
         update_option( 'mdf_static_llms_txt_detected', true );
     }
+
+    // Same for a pre-existing capability document: its file shadows the
+    // plugin's virtual /mdf.json. Detect, never touch.
+    if ( file_exists( ABSPATH . 'mdf.json' ) ) {
+        update_option( 'mdf_static_mdf_json_detected', true );
+    }
 }
 
 function mdf_deactivate(): void {
@@ -1968,6 +2058,8 @@ function mdf_uninstall(): void {
     delete_option( 'mdf_cache_writable_error' );
     delete_option( 'mdf_static_llms_txt_detected' );
     delete_option( 'mdf_static_llms_txt_notice_dismissed' );
+    delete_option( 'mdf_static_mdf_json_detected' );
+    delete_option( 'mdf_static_mdf_json_notice_dismissed' );
     delete_option( 'mdf_llms_txt' );
     delete_option( 'mdf_negotiation_status' );
     delete_option( MDF_OWNER_CONFIRMED_OPTION );
@@ -2204,6 +2296,7 @@ function mdf_ua_first_token( string $ua ): string {
 // ---------------------------------------------------------------------------
 
 add_action( 'init', 'mdf_serve_llms_txt' );
+add_action( 'init', 'mdf_serve_mdf_json' );
 
 /**
  * Read the owner-supplied llms.txt option.
@@ -2360,29 +2453,36 @@ function mdf_llms_txt_session_only_note(): string {
         . 'Pages that need a shopper session — the cart, checkout and account pages, and their endpoints — are served as HTML only and never as markdown.';
 }
 
-function mdf_serve_llms_txt(): void {
+/**
+ * Whether the current request is a GET or HEAD for exactly $path.
+ *
+ * Path matching only (query string ignored), as both discovery documents are
+ * served at their exact site-root path and nowhere else.
+ */
+function mdf_discovery_request_path_is( string $path ): bool {
     $uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-    $path = wp_parse_url( $uri, PHP_URL_PATH );
 
-    if ( $path !== '/llms.txt' ) {
-        return;
+    if ( wp_parse_url( $uri, PHP_URL_PATH ) !== $path ) {
+        return false;
     }
 
     $method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
-    if ( ! in_array( $method, [ 'GET', 'HEAD' ], true ) ) {
-        return;
-    }
 
-    $effective = mdf_get_servable_llms_txt();
+    return in_array( $method, [ 'GET', 'HEAD' ], true );
+}
 
-    if ( $effective['content'] === '' ) {
-        return;
-    }
-
-    $content = $effective['content'];
-    $mtime   = $effective['modified'];
-    $size    = strlen( $content );
-    $if_mod  = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
+/**
+ * Answer the current request with a discovery document and exit.
+ *
+ * Shared by /llms.txt and /mdf.json so both get the same conditional-GET,
+ * caching and HEAD behaviour: Last-Modified plus If-Modified-Since → 304,
+ * an explicit Content-Length, nosniff, and a one-hour public cache.
+ *
+ * Nothing here comes from the request; callers pass stored content only.
+ */
+function mdf_send_discovery_document( string $content_type, string $content, int $mtime ): void {
+    $size   = strlen( $content );
+    $if_mod = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
 
     if ( $if_mod !== '' ) {
         $if_mod_time = strtotime( $if_mod );
@@ -2394,18 +2494,116 @@ function mdf_serve_llms_txt(): void {
     }
 
     status_header( 200 );
-    header( 'Content-Type: text/plain; charset=utf-8' );
+    header( 'Content-Type: ' . $content_type );
     header( 'Content-Length: ' . $size );
     header( 'X-Content-Type-Options: nosniff' );
     header( 'Last-Modified: ' . gmdate( 'D, d M Y H:i:s', $mtime ) . ' GMT' );
     header( 'Cache-Control: public, max-age=3600' );
 
+    $method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
     if ( $method === 'HEAD' ) {
         exit;
     }
 
-    echo $content;
+    echo $content; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- stored document, served verbatim.
     exit;
+}
+
+function mdf_serve_llms_txt(): void {
+    if ( ! mdf_discovery_request_path_is( '/llms.txt' ) ) {
+        return;
+    }
+
+    $effective = mdf_get_servable_llms_txt();
+
+    if ( $effective['content'] === '' ) {
+        return;
+    }
+
+    mdf_send_discovery_document( 'text/plain; charset=utf-8', $effective['content'], $effective['modified'] );
+}
+
+// ---------------------------------------------------------------------------
+// /mdf.json — the MDF capability document
+//
+// Free-only: the site declares open access everywhere (an empty rails list)
+// and no priced sections. It is a capability and mechanism declaration, not a
+// coverage index — MDF 0.3.1 CONCEPT.md is explicit that it must not state
+// which URLs currently have markdown, so per-page exclusions (WooCommerce
+// cart/checkout/account, archives, password-protected content) are answered at
+// request time instead, with normal HTML and no Vary: Accept.
+//
+// Built from stored WordPress state only. Nothing from the request reaches it,
+// and no file is ever written to the web root.
+// ---------------------------------------------------------------------------
+
+/**
+ * The capability document this site publishes.
+ *
+ * @return array<string,mixed>
+ */
+function mdf_capability_document(): array {
+    $doc = [
+        'mdf_version' => MDF_SPEC_VERSION,
+        'site'        => untrailingslashit( home_url( '/' ) ),
+        'pricing'     => [ 'default' => [ 'rails' => [] ] ],
+        // The vendored converter produces CommonMark, with no YAML frontmatter
+        // and no LaTeX math pass.
+        'formats'     => [ 'dialect' => 'commonmark' ],
+        'llms_txt'    => home_url( '/llms.txt' ),
+    ];
+
+    $name = wp_strip_all_tags( (string) get_bloginfo( 'name' ) );
+    if ( $name !== '' ) {
+        $doc['name'] = $name;
+    }
+
+    return $doc;
+}
+
+/**
+ * Last-Modified for the capability document: when negotiation was last
+ * confirmed. Stable across requests, so conditional GETs work, and it moves
+ * when the self-test re-runs and re-confirms.
+ */
+function mdf_capability_document_mtime(): int {
+    $checked = (int) mdf_get_negotiation_status()['checked'];
+
+    return $checked > 0 ? $checked : time();
+}
+
+/**
+ * Serve /mdf.json, or decline with 404 when the site is not asserting MDF.
+ *
+ * The gate is the same one that decides the llms.txt claim: offering on and
+ * negotiation confirmed. A site that cannot show it serves markdown does not
+ * advertise a capability document, and a 404 is the honest answer — the spec
+ * makes /mdf.json a MUST for a conformant site, so a site that is not serving
+ * markdown is not claiming conformance and must not publish one.
+ */
+function mdf_serve_mdf_json(): void {
+    if ( ! mdf_discovery_request_path_is( MDF_MDF_JSON_PATH ) ) {
+        return;
+    }
+
+    $reason = mdf_negotiation_claim_block_reason();
+
+    if ( '' !== $reason ) {
+        status_header( 404 );
+        header( 'Content-Type: application/json; charset=utf-8' );
+        header( 'X-Content-Type-Options: nosniff' );
+        header( 'Cache-Control: no-store' );
+
+        $method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
+        if ( $method !== 'HEAD' ) {
+            echo wp_json_encode( [ 'error' => 'unavailable', 'reason' => $reason ] );
+        }
+        exit;
+    }
+
+    $body = wp_json_encode( mdf_capability_document(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
+
+    mdf_send_discovery_document( 'application/json; charset=utf-8', $body, mdf_capability_document_mtime() );
 }
 
 // ---------------------------------------------------------------------------
@@ -2442,6 +2640,7 @@ function mdf_render_negotiation_status_block(): void {
     $status      = mdf_get_negotiation_status();
     $owner       = mdf_negotiation_owner_confirmed();
     $claim       = mdf_negotiation_claim_confirmed();
+    $mdf_json_published = $claim;
     $wpsc_active = mdf_wpsc_active();
     $mod_rewrite = mdf_wpsc_mod_rewrite_mode();
     $adapter     = $wpsc_active && mdf_wpsc_adapter_registered();
@@ -2496,6 +2695,21 @@ function mdf_render_negotiation_status_block(): void {
         </p>
 
         <p class="description" style="margin:6px 0 0;"><strong>Machine-readable claim in /llms.txt:</strong> <?php echo $claim ? 'published' : 'withheld'; ?>.</p>
+
+        <?php
+        $mdf_json_url    = home_url( MDF_MDF_JSON_PATH );
+        $mdf_json_static = (bool) get_option( 'mdf_static_mdf_json_detected', false );
+        ?>
+        <p class="description" style="margin:4px 0 0;">
+            <strong>Capability document <code>/mdf.json</code>:</strong>
+            <?php if ( $mdf_json_static ) : ?>
+                a static <code>mdf.json</code> in your web root takes priority over the plugin's document — <a href="<?php echo esc_url( $mdf_json_url ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $mdf_json_url ); ?></a>.
+            <?php elseif ( $mdf_json_published ) : ?>
+                published — <a href="<?php echo esc_url( $mdf_json_url ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $mdf_json_url ); ?></a>.
+            <?php else : ?>
+                withheld, answered with <code>404</code>, because <?php echo esc_html( mdf_negotiation_claim_reason_text() ); ?>. The document is only published when markdown is actually reaching agents.
+            <?php endif; ?>
+        </p>
 
         <?php if ( $status['checked'] > 0 ) : ?>
             <p class="description" style="margin:4px 0 0;">
