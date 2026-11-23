@@ -22,7 +22,7 @@ The dashboard shows you:
 
 - How many AI agents are hitting your site, and which ones
 - Whether any are already sending `Accept: text/markdown` headers
-- What you would have earned if you'd been serving *paid* markdown content (payments are not yet implemented — see Roadmap)
+- What you would have earned if you'd been serving *paid* markdown content (payments are not implemented — see [Paid markdown (planned)](#paid-markdown-planned))
 - A daily trend chart of inbound agent traffic
 - A separate table for internal/monitor traffic (uptime checkers, WordPress core calls) so they don't inflate your agent counts
 
@@ -156,19 +156,19 @@ Only types 1, 2, and 3 — plus any `Accept: text/markdown` requests — are wri
 
 ---
 
-## Roadmap
+## Paid markdown (planned)
 
-### Phase 2 — Wallet integration & paid markdown
-Connect a wallet and start serving real `402` responses to agents that request markdown, with price-gated access enforced via the x402 payment rail. Blocked on the upstream payment-verification oracle reaching commercial launch — see [CHANGELOG.md](CHANGELOG.md) for status.
-
-Markdown generation itself (previously listed as "Phase 3") already shipped in v0.1.4 — see [Markdown serving](#markdown-serving) above.
+Today the plugin serves markdown free of charge. Charging agents for markdown, by answering with an MDF `402` and accepting payment over x402, is planned but not scheduled. The [reference server](https://github.com/bitcryptic-gw/mdf-reference-server) shows what a priced MDF site looks like now.
 
 ---
 
 ## Part of the MDF ecosystem
 
-MDF (Markdown First) is an open web standards proposal that makes AI agents first-class content consumers via HTTP content negotiation. Same URL, same domain — agents that send `Accept: text/markdown` get clean markdown; browsers get HTML. Access policy is expressed through price using [x402](https://x402.org) (EVM/stablecoin) and [L402](https://github.com/lightning/blips) (Bitcoin/Lightning) payment rails.
+MDF (Markdown First) is an open web standards proposal that makes AI agents first-class content consumers via HTTP content negotiation. Same URL, same domain — agents that send `Accept: text/markdown` get clean markdown; browsers get HTML. Where a site charges for markdown, access policy is expressed as price: the site answers with a `402` whose body is an x402 v2 `PaymentRequired` object, and MDF's own fields travel under `extensions.mdf`. Two settlement rails are defined: **USDC on Base**, a stablecoin rail (x402's `exact` scheme on an EVM network), and **Bitcoin over Lightning**, offered as an entry in the 402's `accepts[]` array.
 
+This plugin implements the content-negotiation and `llms.txt` half of that: markdown on request, and the machine-readable claim in `/llms.txt`. It does not serve MDF's `/mdf.json` capability document and does not take payment — see [Paid markdown (planned)](#paid-markdown-planned).
+
+- **Project site:** [markdownfirst.com](https://markdownfirst.com)
 - **Spec:** [github.com/bitcryptic-gw/mdf](https://github.com/bitcryptic-gw/mdf)
 - **Reference implementation:** [github.com/bitcryptic-gw/mdf-reference-server](https://github.com/bitcryptic-gw/mdf-reference-server)
 - **Live demo:** [mdf-demo.bitcryptic.com](https://mdf-demo.bitcryptic.com)
