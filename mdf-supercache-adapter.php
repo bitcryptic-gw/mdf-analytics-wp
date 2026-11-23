@@ -69,8 +69,9 @@ if ( ! function_exists( 'mdf_wpsc_markdown_bypass' ) ) {
      * Disable WP Super Cache for markdown requests during its `cache_init`
      * action.
      *
-     * Phase 1 checks `$cache_enabled` immediately after `cache_init` and returns
-     * before `wp_cache_serve_cache_file()`, so nothing is read; and
+     * WP Super Cache's phase 1 (`wp-cache-phase1.php`) checks `$cache_enabled`
+     * immediately after `cache_init` and returns before
+     * `wp_cache_serve_cache_file()`, so nothing is read; and
      * `wp_cache_postload()` returns before `wp_cache_phase2()`, so the output
      * buffer callback is never installed and nothing is written. The
      * `DONOTCACHEPAGE` constant is belt-and-braces.

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MDF Analytics
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
- * Description: Tracks AI agent traffic and Accept: text/markdown requests. Phase 1 of MDF (Markdown First) ecosystem support — visibility dashboard with estimated earnings. No content modification, no payment processing.
+ * Description: Serves clean markdown to AI agents that request it and shows which agents are visiting — free today, with paid markdown over x402 planned.
  * Version:     0.1.14
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
@@ -3051,11 +3051,19 @@ function mdf_render_settings(): void {
         </form>
         <hr>
         <h2>About MDF Analytics</h2>
-        <p>This plugin is Phase 1 of the <a href="https://github.com/bitcryptic-gw/mdf" target="_blank">MDF (Markdown First)</a> ecosystem.
-        It tracks AI agent traffic and <code>Accept: text/markdown</code> requests to your site, giving you visibility into potential earnings
-        before you set up a wallet or serve markdown content.</p>
-        <p><strong>Phase 2 (roadmap):</strong> Connect a Lightning or Base wallet and start earning from agents that request markdown.</p>
-        <p><strong>Phase 3 — shipped:</strong> Published content is automatically converted to CommonMark and cached — no manual work required. Enable it above under "Offer markdown to agents."</p>
+        <p><?php echo esc_html__( 'MDF Analytics serves a clean markdown version of your posts and pages to AI agents that send Accept: text/markdown, at the same URL — and shows you which agents are visiting. Browsers, search engines and human visitors get exactly the page they get today.', 'mdf-analytics' ); ?></p>
+        <p><?php echo esc_html__( 'Markdown is served free of charge. Charging agents for it — answering with an MDF 402 and accepting payment over x402 — is planned, not scheduled.', 'mdf-analytics' ); ?></p>
+        <p>
+            <?php echo esc_html__( 'Part of the MDF (Markdown First) ecosystem, by', 'mdf-analytics' ); ?>
+            <a href="<?php echo esc_url( 'https://bitcryptic.com' ); ?>" target="_blank" rel="noopener noreferrer">BitCryptic™</a>
+            <?php echo esc_html__( 'and', 'mdf-analytics' ); ?>
+            <a href="<?php echo esc_url( 'https://slepner.com.au' ); ?>" target="_blank" rel="noopener noreferrer">Slepner</a>.
+        </p>
+        <p>
+            <a href="<?php echo esc_url( 'https://markdownfirst.com/' ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__( 'Learn more at markdownfirst.com', 'mdf-analytics' ); ?></a>
+            &middot;
+            <a href="<?php echo esc_url( 'https://github.com/bitcryptic-gw/mdf-analytics-wp' ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__( 'Plugin README on GitHub', 'mdf-analytics' ); ?></a>
+        </p>
     </div>
     <?php
 }
@@ -3200,7 +3208,7 @@ function mdf_render_dashboard(): void {
             <?php endif; ?>
         </div>
 
-        <?php mdf_phase2_callout(); ?>
+        <?php mdf_estimates_callout(); ?>
 
         <p style="margin-top:32px; color:#888; font-size:12px;">
             MDF Analytics v<?php echo esc_html( MDF_VERSION ); ?> —
@@ -3273,12 +3281,12 @@ function mdf_sparkline( array $daily ): void {
     echo '</svg>';
 }
 
-function mdf_phase2_callout(): void {
+function mdf_estimates_callout(): void {
     ?>
     <div style="margin-top:32px; background:#f0f6fc; border:1px solid #c3d9f0; border-left:4px solid #2271b1; border-radius:4px; padding:16px 20px;">
-        <strong>Ready to start earning?</strong>
-        Phase 2 of MDF Analytics (coming soon) will let you connect a Lightning wallet or Base USDC wallet and serve markdown content to AI agents — converting the traffic above into real payments.
-        <a href="https://github.com/bitcryptic-gw/mdf" target="_blank" style="margin-left:8px;">Learn more about MDF →</a>
+        <strong><?php echo esc_html__( 'These are estimates, not earnings.', 'mdf-analytics' ); ?></strong>
+        <?php echo esc_html__( 'The two estimate cards multiply logged requests by the rate on the Settings page. No payment is taken and nobody is charged. Paid markdown over x402 is planned, not scheduled.', 'mdf-analytics' ); ?>
+        <a href="<?php echo esc_url( 'https://markdownfirst.com/' ); ?>" target="_blank" rel="noopener noreferrer" style="margin-left:8px;"><?php echo esc_html__( 'markdownfirst.com', 'mdf-analytics' ); ?> &rarr;</a>
     </div>
     <?php
 }
