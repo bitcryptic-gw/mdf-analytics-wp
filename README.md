@@ -266,4 +266,4 @@ No Composer or npm runtime dependency — the plugin ships its dependencies vend
 
 ## License
 
-MIT — copyright Gary Walker (BitCryptic™) and Graham Hall (Slepner). See [LICENSE](LICENSE).
+MIT — copyright [BitCryptic™](https://bitcryptic.com) and [Slepner](https://slepner.com.au). See [LICENSE](LICENSE).

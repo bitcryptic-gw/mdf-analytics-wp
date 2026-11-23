@@ -6,8 +6,8 @@
  * Version:     0.1.14
  * Requires at least: 6.0
  * Requires PHP: 8.0
- * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
- * Author URI:  https://bitcryptic.com
+ * Author:      BitCryptic™ and Slepner
+ * Author URI:  https://markdownfirst.com/
  * License:     MIT
  * Text Domain: mdf-analytics
  */
