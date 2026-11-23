@@ -4,6 +4,8 @@
  * Plugin URI:  https://github.com/bitcryptic-gw/mdf
  * Description: Serves clean markdown to AI agents that request it and shows which agents are visiting — free today, with paid markdown over x402 planned.
  * Version:     0.1.14
+ * Requires at least: 6.0
+ * Requires PHP: 8.0
  * Author:      Gary Walker (BitCryptic™) & Graham Hall (Slepner)
  * Author URI:  https://bitcryptic.com
  * License:     MIT
