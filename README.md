@@ -83,6 +83,8 @@ This is also where you enable **"Offer markdown to agents"** — the toggle that
 
 Below that, a **negotiation status** tells you whether markdown actually reaches clients, and whether the machine-readable claim in the bundled `/llms.txt` is being **published** or **withheld**. The self-test probes up to three qualifying **clean-path** URLs (front page first, then the most recently modified published, publicly viewable, password-free content with a non-empty cached `.md`). Query-string permalinks are excluded, because a query string makes the page cache stand aside and would test the wrong path. Each URL is confirmed publicly reachable, then requested in **both** `Accept-Encoding` variants — the default (gzip) and `identity` — because the page-cache key differs by encoding. Outcomes: **working** (every reachable probe in both encodings returned markdown, so the claim is published), **blocked** (one or more probes returned HTML — a page cache is serving cached pages to agents; the URL and encoding are named and the claim is withheld), and **unknown** (the loopback failed or no probe URL was reachable — normal on many hosts, never reported as blocked, claim withheld). The test runs on activation, when the toggle is switched on, once a day, and from the **Re-test now** button; it never runs on a normal page load.
 
+On a WooCommerce site the self-test also sends **negative probes**: the cart, checkout and account URLs and one account endpoint are requested in both encodings with `Accept: text/markdown`. Those pages must never answer with markdown, so any markdown response there reports **blocked**, naming the URL and encoding — the claim is withheld regardless of what the positive probes found.
+
 When offering is on but the self-test cannot confirm (**unknown** — common on hosts that block loopback HTTP), the page offers an **"I have verified markdown negotiation myself"** checkbox, next to the exact `curl` command to run against your own URL and the response to expect (`content-type: text/markdown` and `Vary: Accept`). Ticking it publishes the claim on your authority; it is cleared automatically if you switch markdown offering off or if a later self-test reports blocked. The status always states plainly whether the claim is published or withheld, and why.
 
 The same page also has an **llms.txt editor** (as of v0.1.10) — see [llms.txt serving](#llmstxt-serving) below.
@@ -97,6 +99,8 @@ The bundled file in the plugin directory is the read-only default template. Edit
 
 The bundled default's "Machine-readable content" section is served **only when markdown offering is enabled and negotiation is confirmed** — by the self-test (`working`) or by your own override. In every other case (offering off, **blocked**, or unconfirmed **unknown**) the bundled default is served with that section replaced by a neutral, attribution-only "About this file" section, because the plugin will not assert a capability the site has not been shown to have. **Content you saved in the editor is always served verbatim** in every state; the plugin surfaces any mismatch as an admin warning instead of altering your text. When the claim is confirmed, the bundled template is served byte-for-byte unchanged.
 
+On a WooCommerce site whose claim is published, the bundled default template also carries a short **Session-only pages** section, stating that the cart, checkout and account pages and their endpoints are served as HTML only and never as markdown — so the file never implies markdown is available for a page that has none. This applies to the bundled default; content you saved in the editor is served verbatim in every state, as above.
+
 **If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy — default or saved — is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The same warning appears inside the llms.txt editor. The plugin never reads, edits, or deletes your existing file.
 
 Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
@@ -108,13 +112,22 @@ Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics 
 
 ## Markdown serving
 
-Since v0.1.4, the plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
+The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
 
-Only a **singular** object has a markdown variant: archives and other non-singular views always receive their normal HTML, because an archive's queried object ID is a term ID and could otherwise be mistaken for a cached post. A variant that converts to nothing (zero bytes) is not served either.
+### What is never served as markdown
+
+Some pages and objects are excluded on purpose. For each of these, a markdown request gets the normal HTML response and no `Vary: Accept` — which is what the MDF specification requires where no markdown representation exists:
+
+- **Non-singular views.** Archives, the blog index and other listing views always get HTML. Only a single post, page or public custom post type can have a markdown variant.
+- **Zero-byte variants.** If an object's body converts to nothing, the empty file is not served.
+- **WooCommerce cart, checkout and account pages**, including their endpoints (`order-pay`, `order-received`, every account endpoint), **and the shop page**. See below.
+- **Password-protected content.**
+- **Post types that are not publicly viewable.**
+- **Pages a third party has marked uncacheable** by defining `DONOTCACHEPAGE`. The bundled WP Super Cache adapter defines that constant on its own markdown requests to bypass the page cache, so it also defines `MDF_WPSC_MARKDOWN_BYPASS` in the same step; that marker is what stops the adapter's own define being mistaken for a third-party one.
 
 ### Transactional pages (WooCommerce)
 
-Since v0.1.14, on a WooCommerce site the cart, checkout (with its `order-pay` and `order-received` endpoints) and account area (with every account endpoint) are **never** offered as markdown. They are excluded from conversion, the backfill, `save_post` rebuilds, the cached-ID listing and the manifest, and from serving — by request conditional and by page ID. A relocated page is caught by scanning page content for the cart/checkout/account shortcode or block. The shop page is excluded as well: its body is empty and its listing is generated at request time. An excluded page answers a markdown request with its normal HTML and no `Vary: Accept`, which is what the MDF specification requires where no markdown representation exists.
+On a WooCommerce site the cart, checkout (with its `order-pay` and `order-received` endpoints) and account area (with every account endpoint) are **never** offered as markdown. They are excluded from conversion, the backfill, `save_post` rebuilds, the cached-ID listing and the manifest, and from serving — by request conditionals and by page ID. A relocated page is caught by scanning page content for the cart/checkout/account shortcode or block. The shop page is excluded as well: its body is empty and its listing is generated at request time.
 
 On upgrade from 0.1.13 the activation hook deletes any `.md` file already cached for those pages and records what it removed in the `mdf_exclusion_cleanup` option.
 
@@ -122,8 +135,8 @@ Conversion is handled by the vendored `league/html-to-markdown` library.
 
 ### Known limitations
 
-- **WP Super Cache — reverse race condition (addressable, see below).** As of v0.1.7, the plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction — WPSC caching the **HTML** response first and then serving it to `Accept: text/markdown` requests, because `wpsc_get_accept_header()` maps `text/markdown` to `text/html` — is addressed by the bundled adapter described in [WP Super Cache adapter](#wp-super-cache-adapter), except in WP Super Cache's Expert (mod_rewrite) mode. If you run WP Super Cache in that mode, or run another page cache or CDN, use the negotiation self-test on the Settings page to see whether markdown is actually reaching agents.
-- **HTML entity decoding.** Standard HTML entities (e.g. `&amp;`) are currently preserved as-is in converted markdown rather than decoded, so agents may see `&amp;` where a human reader would see `&`. This doesn't break parsing but is cosmetically imperfect.
+- **WP Super Cache — reverse race condition (addressable, see below).** The plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction — WPSC caching the **HTML** response first and then serving it to `Accept: text/markdown` requests, because `wpsc_get_accept_header()` maps `text/markdown` to `text/html` — is addressed by the bundled adapter described in [WP Super Cache adapter](#wp-super-cache-adapter), except in WP Super Cache's Expert (mod_rewrite) mode. If you run WP Super Cache in that mode, or run another page cache or CDN, use the negotiation self-test on the Settings page to see whether markdown is actually reaching agents.
+- **Escaped characters in the raw markdown.** Conversion writes a literal ampersand as `&amp;`, and `<` / `>` as `&lt;` / `&gt;`. That is correct markdown — it renders identically in a browser and avoids an unescaped `&` being read as the start of an entity — but an agent reading the raw text sees the escape where a human sees `&`. Other HTML entities such as `&eacute;` or `&hellip;` are decoded to the character they represent.
 
 ### WP Super Cache adapter
 
