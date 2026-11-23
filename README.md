@@ -59,6 +59,12 @@ If you get `text/html` and no `vary: Accept`, one of three things is happening: 
 
 To see whether agents are actually asking, open the dashboard.
 
+The capability document is at the same root. Once negotiation is confirmed it should be there; while the site is not serving markdown it deliberately answers 404:
+
+```bash
+curl -s https://example.com/mdf.json
+```
+
 ---
 
 ## Dashboard
@@ -135,9 +141,36 @@ Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics 
 
 ---
 
+## /mdf.json
+
+MDF's canonical discovery document. The plugin serves a **free-only** capability document virtually at the site root (`/mdf.json`) — never written to your installation's root directory — so agents can learn what the site offers before they fetch anything.
+
+```json
+{
+    "mdf_version": "0.3.1",
+    "site": "https://example.com",
+    "name": "Example Site",
+    "pricing": { "default": { "rails": [] } },
+    "formats": { "dialect": "commonmark" },
+    "llms_txt": "https://example.com/llms.txt"
+}
+```
+
+An empty `rails` list means open access: everything is free. There are no priced sections, no payment block, no auth endpoint and no feed declaration — the plugin takes no payment, and it does not assert content signals (training or search consent) on your behalf.
+
+**It is published only when the site is actually serving markdown**: markdown offering on, and negotiation confirmed by the self-test (`working`) or by your own override. In every other state — offering off, **blocked**, or unconfirmed **unknown** — `/mdf.json` answers **404** with a short JSON reason rather than advertising a capability the site has not been shown to have. The Settings page states which state the document is in, and why.
+
+The document is a capability and mechanism declaration, not a coverage index: it does not say which URLs currently have markdown, and it never should. Per-URL availability is answered by the request itself — see [What is never served as markdown](#what-is-never-served-as-markdown).
+
+**If your site already has a real `mdf.json` at the web root**, your web server serves that file before WordPress runs and it takes priority. The plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice. It never reads, edits or deletes your file.
+
+Like `/llms.txt`, the response is `GET`/`HEAD` only, carries `X-Content-Type-Options: nosniff`, `Content-Length` and `Last-Modified`, answers `If-Modified-Since` with `304`, and is publicly cacheable for an hour. Requests are logged through the same visitor classifier.
+
+---
+
 ## Markdown serving
 
-The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
+The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header and `X-MDF-Version: 1`; all other requests receive HTML as normal, with no `Vary` header added. The HTML at a URL that does have a markdown variant carries `X-MDF-Version: 1` too, as MDF 0.3.1 requires for both representations.
 
 Conversion is handled by the vendored `league/html-to-markdown` library. Responses support conditional GET (`If-Modified-Since`) and HEAD, and are marked publicly cacheable for an hour.
 
@@ -212,7 +245,7 @@ Today the plugin serves markdown free of charge. Charging agents for markdown, b
 
 MDF (Markdown First) is an open web standards proposal that makes AI agents first-class content consumers via HTTP content negotiation. Same URL, same domain — agents that send `Accept: text/markdown` get clean markdown; browsers get HTML. Where a site charges for markdown, access policy is expressed as price: the site answers with a `402` whose body is an x402 v2 `PaymentRequired` object, and MDF's own fields travel under `extensions.mdf`. Two settlement rails are defined: **USDC on Base**, a stablecoin rail (x402's `exact` scheme on an EVM network), and **Bitcoin over Lightning**, offered as an entry in the 402's `accepts[]` array.
 
-This plugin implements the content-negotiation and `llms.txt` half of that: markdown on request, and the machine-readable claim in `/llms.txt`. It does not serve MDF's `/mdf.json` capability document and does not take payment — see [Paid markdown (planned)](#paid-markdown-planned).
+This plugin implements MDF's content negotiation, both discovery documents, and the protocol header: markdown on request, `/llms.txt` with a machine-readable claim, a free-only `/mdf.json` capability document, and `X-MDF-Version` on both representations. A site running it with markdown enabled and negotiation confirmed is **MDF 0.3.1 conformant for free content** — every MUST that applies to a free-only site. It does not take payment — see [Paid markdown (planned)](#paid-markdown-planned).
 
 - **Project site:** [markdownfirst.com](https://markdownfirst.com)
 - **Spec:** [github.com/bitcryptic-gw/mdf](https://github.com/bitcryptic-gw/mdf)
@@ -244,13 +277,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.15 | 2026-11-23 | Added: a free-only `/mdf.json` capability document (MDF 0.3.1), published only when markdown offering is on and negotiation is confirmed, 404 otherwise, with static-file shadow detection. Added: `X-MDF-Version: 1` on markdown responses and on the HTML at URLs that have a variant. Fixed: a delayed re-test after activation when the WP Super Cache adapter was just registered, so a stale compiled config cannot withhold the claim for a day. Changed: admin copy now says free markdown today and paid markdown over x402 planned; plugin header declares WordPress 6.0 / PHP 8.0; attribution is BitCryptic™ and Slepner. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.14 | 2026-10-25 | Added: WooCommerce cart, checkout (with `order-pay`/`order-received`), account (with every account endpoint) and shop pages are never offered as markdown, with upgrade cleanup of any variant already cached. Added: self-test negative probes on those URLs in both encodings — any markdown answer reports `blocked`. Added: llms.txt "Session-only pages" section on Woo sites. Fixed: non-singular views (archives) could be answered with an unrelated post's markdown; zero-byte variants are no longer served. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.13 | 2026-09-20 | Fixed: the WP Super Cache adapter is now a total bypass — on a markdown request it sets `$cache_enabled = false` and defines `DONOTCACHEPAGE`, so the request neither reads nor writes the page cache. The previous marker-keyed design could cache an HTML fallback under the markdown key and then serve it to later markdown requests. Fixed: self-test excludes query-string permalinks and probes both gzip and `identity` encodings. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.12 | 2026-09-20 | Fixed: the machine-readable `/llms.txt` claim is now published only when offering is enabled **and** negotiation is confirmed (self-test or owner override) — previously it was suppressed only on `blocked`, so offer-off sites published a false claim. Fixed: self-test URL selection now skips non-public post types, empty/missing `.md`, and unreachable URLs, probes up to three, and reports a markdown/HTML split as `blocked`. Added: owner confirmation override with a one-line per-state reason. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.11 | 2026-09-20 | Added: negotiation self-test (working/blocked/unknown) stored in `mdf_negotiation_status`; honest `/llms.txt` that drops the markdown-negotiation claim when blocked while never altering saved custom content; bundled WP Super Cache adapter registered by path via `wpsc_plugins`, fixing the reverse race in standard mode with an honest Expert (mod_rewrite) caveat. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.10 | 2026-09-19 | Added: in-admin llms.txt editor on the Settings page — content is stored in the database (option `mdf_llms_txt`) and survives plugin upgrades; the bundled file becomes the read-only default template; a static-webroot warning is shown in the editor. Changed: `/llms.txt` now serves the stored option when set, falling back to the bundled default otherwise. See [CHANGELOG.md](CHANGELOG.md). |
 
-Older releases (0.1.0 through 0.1.9) are listed in [CHANGELOG.md](CHANGELOG.md). There is no v0.1.5 — the version was skipped.
+Older releases (0.1.0 through 0.1.10) are listed in [CHANGELOG.md](CHANGELOG.md). There is no v0.1.5 — the version was skipped.
 
 ---
 

@@ -12,6 +12,64 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-23
+
+### Added
+- **Free-only `/mdf.json` capability document.** MDF 0.3.1 makes the
+  capability document a MUST for a conformant site, so the plugin now serves
+  one virtually at the site root — `mdf_version` `0.3.1`, the WordPress site
+  identity, and `pricing.default.rails: []` with no priced sections. No auth,
+  feed, or content-signal blocks are invented. `application/json;
+  charset=utf-8`, `X-Content-Type-Options: nosniff`, `Content-Length`,
+  `Last-Modified` with `If-Modified-Since` → 304, one-hour public cache,
+  GET/HEAD only. Never written to `ABSPATH`; served through the same
+  responder as `/llms.txt` rather than a second implementation.
+- **`X-MDF-Version: 1`** on the negotiated markdown response (200 and 304)
+  and on the HTML served at a URL that has a markdown variant — the third
+  MUST in MDF 0.3.1's Content Serving section.
+- **Static `/mdf.json` shadow detection.** A real file in the web root takes
+  priority over the virtual document; detected at activation and on admin
+  loads, with a dismissible notice. The file is never read, edited or deleted.
+- Settings states whether `/mdf.json` is published or withheld, with the
+  reason and a link.
+- Tests: `tests/fixtures/mdf.schema.json` (the real v0.3.1 schema, kept out
+  of the release zip) plus a draft-2020-12 subset evaluator, and coverage for
+  the document, its gating, headers, 304, HEAD, static shadowing, the delayed
+  re-test and the admin copy.
+
+### Fixed
+- **Activation self-test transient.** The activation-path self-test could
+  report `blocked` because registering the WP Super Cache adapter rewrites
+  `wp-cache-config.php` and an Apache worker still held the stale compiled
+  copy (4 of 9 sites in the 0.1.14 rollout). When the activation self-test is
+  `blocked` **and** that activation registered the adapter, one re-test is
+  scheduled about 60 s later, verified after scheduling, and never rescheduled.
+  A genuine `blocked` is still reported blocked.
+
+### Changed
+- **Admin copy now matches the plugin.** Plugin header description, the
+  Settings "About MDF Analytics" box and the dashboard footer no longer use
+  the retired Phase 1/2/3 numbering or promise a wallet. They state: free
+  markdown today, agent-traffic dashboard, paid markdown over x402 planned but
+  not scheduled. Attribution is BitCryptic™ and Slepner, with links.
+- **Requirements declared.** Plugin header gains `Requires at least: 6.0`,
+  `Requires PHP: 8.0` and `Tested up to` (the version the Stage 1 end-to-end
+  run exercised); `composer.json` narrows `php` from `^7.4 || ^8.0` to `^8.0`.
+- **Attribution.** `Author: BitCryptic™ and Slepner`, `Author URI` the project
+  site, LICENSE copyright line naming both with URLs.
+- `/llms.txt` is unchanged in content and byte size (1161 B non-Woo, 1331 B
+  Woo with the claim published) — MDF 0.3.1 makes no SHOULD or MUST that
+  `llms.txt` advertise `/mdf.json`, so nothing was added to the bundled file.
+
+### Notes
+- `/mdf.json` is gated on the same condition as the `llms.txt` claim: offering
+  on and negotiation confirmed. Withheld states answer 404 with a JSON reason
+  and `Cache-Control: no-store`, so the site never advertises a capability it
+  has not been shown to have. MDF makes `/mdf.json` a MUST for a conformant
+  site, so a site serving no markdown is not claiming conformance.
+- Per-URL exclusions are deliberately not expressed in `/mdf.json`: CONCEPT.md
+  says the document is a capability declaration, not a coverage index.
+
 ## [0.1.14] - 2026-10-25
 
 ### Added
@@ -390,7 +448,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 2 callout CTA in dashboard footer.
 - No IP addresses stored. No external HTTP requests. No dependencies beyond WordPress core.
 
-[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.14...HEAD
+[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.11...v0.1.12
