@@ -16,6 +16,25 @@ define( 'MINUTE_IN_SECONDS', 60 );
 define( 'HOUR_IN_SECONDS', 3600 );
 define( 'DAY_IN_SECONDS', 86400 );
 
+// Real WordPress defines WP_CACHE when page caching is on; WP Super Cache's
+// activation path depends on it. Individual tests decide whether the cache is
+// actually in place by creating WP_CONTENT_DIR/advanced-cache.php.
+if ( ! defined( 'WP_CACHE' ) ) {
+	define( 'WP_CACHE', true );
+}
+
+// dbDelta() lives in wp-admin/includes/upgrade.php, which the plugin requires.
+// Stand it up once so activation can be exercised without WordPress.
+if ( ! is_dir( ABSPATH . 'wp-admin/includes' ) ) {
+	@mkdir( ABSPATH . 'wp-admin/includes', 0777, true );
+}
+if ( ! file_exists( ABSPATH . 'wp-admin/includes/upgrade.php' ) ) {
+	file_put_contents(
+		ABSPATH . 'wp-admin/includes/upgrade.php',
+		"<?php\nfunction dbDelta( \$sql ) { return array(); }\n"
+	);
+}
+
 // ---------------------------------------------------------------------------
 // Fixture state
 // ---------------------------------------------------------------------------
@@ -36,6 +55,7 @@ $GLOBALS['mdf_test'] = [
 	'current_user' => 0,
 	'hidden_types' => [ 'hidden' ],
 	'scheduled' => [],
+	'plugins'   => [],
 ];
 
 function mdf_test_reset(): void {
@@ -55,6 +75,7 @@ function mdf_test_reset(): void {
 		'current_user' => 0,
 		'hidden_types' => [ 'hidden' ],
 		'scheduled' => [],
+		'plugins'   => [],
 	];
 	if ( is_dir( '/tmp/mdf-test-uploads' ) ) {		mdf_test_rmdir( '/tmp/mdf-test-uploads' );
 	}
@@ -157,16 +178,27 @@ function wp_nonce_field( $action = -1, $name = '_wpnonce' ) {}
 function checked( $checked, $current = true, $echo = true ) { return ''; }
 function selected( $selected, $current = true, $echo = true ) { return ''; }
 function wp_next_scheduled( $hook, $args = [] ) {
-	return empty( $GLOBALS['mdf_test']['scheduled'][ $hook ] ) ? false : time() + 3;
+	$scheduled = $GLOBALS['mdf_test']['scheduled'][ $hook ] ?? false;
+	if ( $scheduled === false ) {
+		return false;
+	}
+	// Recurring events are stored as a presence flag; single events keep their time.
+	return is_int( $scheduled ) ? $scheduled : time() + 3;
 }
 function wp_schedule_single_event( $time, $hook, $args = [] ) {
-	$GLOBALS['mdf_test']['scheduled'][ $hook ] = true;
+	$GLOBALS['mdf_test']['scheduled'][ $hook ] = (int) $time;
 	return true;
 }
-function wp_schedule_event( $time, $recurrence, $hook ) { return true; }
+function wp_schedule_event( $time, $recurrence, $hook ) {
+	if ( empty( $GLOBALS['mdf_test']['scheduled'][ $hook ] ) ) {
+		$GLOBALS['mdf_test']['scheduled'][ $hook ] = true;
+	}
+	return true;
+}
 function wp_clear_scheduled_hook( $hook, $args = [] ) { return true; }
 function wp_doing_cron() { return false; }
 function is_admin() { return false; }
+function is_plugin_active( $plugin ) { return ! empty( $GLOBALS['mdf_test']['plugins'][ $plugin ] ); }
 function get_bloginfo( $key = '' ) { return 'Test Site'; }
 function add_query_arg( ...$args ) { return 'https://example.test/?x=1'; }
 function size_format( $bytes ) { return $bytes . ' B'; }
@@ -177,6 +209,7 @@ function __( $text, $domain = '' ) { return $text; }
 function _e( $text, $domain = '' ) { return null; }
 function esc_html__( $text, $domain = '' ) { return $text; }
 function esc_attr__( $text, $domain = '' ) { return $text; }
+function esc_textarea( $text ) { return htmlspecialchars( (string) $text, ENT_QUOTES ); }
 function wp_kses_post( $html ) { return $html; }
 function sanitize_key( $key ) { return strtolower( preg_replace( '/[^a-z0-9_\-]/i', '', (string) $key ) ); }
 function sanitize_title( $title ) { return strtolower( preg_replace( '/[^a-z0-9\-]/i', '-', (string) $title ) ); }
@@ -251,7 +284,13 @@ class MDF_Test_WPDB {
 	public $like_result = [];
 	public $sql     = [];
 
+	public function get_charset_collate() { return 'DEFAULT CHARSET=utf8mb4'; }
+
 	public function prepare( $query, ...$args ) {
+		// WordPress accepts either variadic args or a single array of them.
+		if ( count( $args ) === 1 && is_array( $args[0] ) ) {
+			$args = $args[0];
+		}
 		foreach ( $args as $arg ) {
 			$query = preg_replace( '/%s/', "'" . str_replace( "'", "\\'", (string) $arg ) . "'", $query, 1 );
 		}
@@ -298,6 +337,42 @@ function mdf_test_write_md( int $id, string $contents = "hello\n" ): void {
 
 function mdf_test_load_plugin(): void {
 	require_once dirname( __DIR__ ) . '/mdf-analytics.php';
+}
+
+/**
+ * Turn WP Super Cache on for the fixture: the plugin is "active" and its
+ * advanced-cache.php is in place, which is what mdf_wpsc_caching() checks.
+ */
+function mdf_test_enable_wpsc( bool $active = true ): void {
+	$GLOBALS['mdf_test']['plugins']['wp-super-cache/wp-cache.php'] = $active;
+
+	if ( ! is_dir( WP_CONTENT_DIR ) ) {
+		mkdir( WP_CONTENT_DIR, 0777, true );
+	}
+	if ( $active ) {
+		file_put_contents( WP_CONTENT_DIR . '/advanced-cache.php', "<?php\n" );
+	} else {
+		@unlink( WP_CONTENT_DIR . '/advanced-cache.php' );
+	}
+}
+
+/**
+ * Queue one response for every probe a self-test makes to $url: the
+ * reachability request (no Accept-Encoding) and the two markdown requests
+ * (gzip, identity). Repeated so the internal retry sees the same answers.
+ */
+function mdf_test_queue_http( string $url, string $content_type, int $times = 1 ): void {
+	$response = [
+		'response' => [ 'code' => 200 ],
+		'headers'  => [ 'content-type' => $content_type ],
+		'body'     => '',
+	];
+
+	foreach ( [ '', 'gzip', 'identity' ] as $encoding ) {
+		for ( $i = 0; $i < $times; $i++ ) {
+			$GLOBALS['mdf_test']['http_queue'][ $url . '|' . $encoding ][] = $response;
+		}
+	}
 }
 
 mdf_test_reset();

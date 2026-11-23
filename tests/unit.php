@@ -7,6 +7,7 @@
 
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/lib.php';
+require __DIR__ . '/schema_lib.php';
 mdf_test_load_plugin();
 
 /**
@@ -323,6 +324,279 @@ if ( isset( $r['error'] ) ) {
 	same( [], $r['excluded_urls'], 'non-Woo site has no negative probes' );
 	same( 'working', $r['selftest']['status'], 'non-Woo self-test still reports working' );
 	same( 'All 2 probe(s) returned text/markdown.', $r['selftest']['detail'], 'non-Woo detail is unchanged from 0.1.13' );
+}
+
+// ---------------------------------------------------------------------------
+group( '/mdf.json: free-only capability document' );
+// ---------------------------------------------------------------------------
+
+$schema = json_decode( (string) file_get_contents( __DIR__ . '/fixtures/mdf.schema.json' ), true );
+ok( is_array( $schema ) && isset( $schema['$defs'] ), 'the v0.3.1 schema fixture loads' );
+same( 'https://raw.githubusercontent.com/bitcryptic-gw/mdf/main/mdf.schema.json', $schema['$id'] ?? '', 'fixture is the schema this plugin declares against' );
+
+$mj = run_state_case( [ 'mdfjson' => true ] );
+if ( isset( $mj['error'] ) ) {
+	ok( false, 'mdf.json state_case ran', (string) $mj['error'] );
+} else {
+	$doc = $mj['mdfjson']['document'];
+
+	same( '0.3.1', $doc['mdf_version'], 'document declares MDF 0.3.1' );
+	same( 'https://example.test', $doc['site'], 'site is the WordPress canonical base URL' );
+	same( 'Test Site', $doc['name'], 'name comes from the site title' );
+	same( [], $doc['pricing']['default']['rails'], 'free everywhere: the default rail list is empty' );
+	ok( ! isset( $doc['pricing']['sections'] ), 'no priced sections' );
+	ok( ! isset( $doc['auth'] ), 'no auth block on a free site' );
+	ok( ! isset( $doc['feed'] ), 'no feed block (MDF change metadata is not implemented)' );
+	ok( ! isset( $doc['content_signals'] ), 'no content signals are asserted on the owner behalf' );
+	same( 'commonmark', $doc['formats']['dialect'], 'formats.dialect matches the vendored converter' );
+	same( 'https://example.test/llms.txt', $doc['llms_txt'], 'llms.txt is advertised' );
+
+	same( [], $mj['mdfjson']['schema_errors'], 'document validates against the MDF 0.3.1 schema' );
+	foreach ( (array) $mj['mdfjson']['schema_example_errors'] as $i => $errors ) {
+		same( [], $errors, 'schema example ' . $i . ' validates (validator is not a no-op)' );
+	}
+
+	// Gating matrix.
+	$reasons = $mj['mdfjson']['block_reasons'];
+	same( 'offering_disabled', $reasons['offering_off'], 'offering off withholds the document' );
+	same( '', $reasons['working'], 'working publishes the document' );
+	same( 'negotiation_blocked', $reasons['blocked'], 'blocked withholds the document' );
+	same( 'negotiation_unconfirmed', $reasons['unknown'], 'unknown withholds the document' );
+	same( '', $reasons['unknown_with_owner'], 'the owner override publishes the document' );
+	same( 'negotiation_blocked', $reasons['blocked_with_owner'], 'a blocked result beats the owner override' );
+
+	same( true, $mj['mdfjson']['static_detected'], 'a web-root mdf.json is detected' );
+	same( true, $mj['mdfjson']['static_cleared'], 'detection clears when the file goes away' );
+	same( 1780000000, $mj['mdfjson']['mtime'], 'Last-Modified follows the last self-test' );
+}
+
+// Negative controls: the validator rejects a document the plugin must not emit.
+$bad = $mj['mdfjson']['document'];
+unset( $bad['pricing'] );
+ok( mdf_schema_validate( $bad, $schema ) !== [], 'schema rejects a document with no pricing' );
+
+$bad = $mj['mdfjson']['document'];
+$bad['pricing']['default']['rails'] = [ [ 'scheme' => 'exact', 'network' => 'eip155:8453', 'asset' => 'x', 'amount' => '0' ] ];
+ok( mdf_schema_validate( $bad, $schema ) !== [], 'schema rejects a zero-priced rail' );
+
+$bad = $mj['mdfjson']['document'];
+$bad['invented'] = true;
+ok( mdf_schema_validate( $bad, $schema ) !== [], 'schema rejects an invented top-level field' );
+
+// ---------------------------------------------------------------------------
+group( '/mdf.json: served, gated, cached, HEAD, 304' );
+// ---------------------------------------------------------------------------
+
+$published = [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'working' ];
+
+$case = run_serve_case( $published );
+same( 200, $case['status'], 'published document answers 200' );
+same( 'application/json; charset=utf-8', header_value( $case['headers'], 'Content-Type' ), 'serves application/json' );
+same( 'nosniff', header_value( $case['headers'], 'X-Content-Type-Options' ), 'serves nosniff' );
+same( 'public, max-age=3600', header_value( $case['headers'], 'Cache-Control' ), 'one-hour public cache, same as llms.txt' );
+same( 'Thu, 28 May 2026 20:26:40 GMT', header_value( $case['headers'], 'Last-Modified' ), 'Last-Modified follows the self-test timestamp' );
+
+$decoded = json_decode( $case['body'], true );
+ok( is_array( $decoded ), 'body is JSON', substr( $case['body'], 0, 120 ) );
+same( '0.3.1', $decoded['mdf_version'] ?? null, 'served body declares 0.3.1' );
+same( (string) strlen( $case['body'] ), header_value( $case['headers'], 'Content-Length' ), 'Content-Length matches the body' );
+same( 'https://example.test', $decoded['site'] ?? null, 'served site matches the fixture site' );
+
+$case = run_serve_case( [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'working', 'method' => 'HEAD' ] );
+same( 200, $case['status'], 'HEAD gets the document headers' );
+same( '', $case['body'], 'HEAD gets no body' );
+
+$case = run_serve_case( [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'working', 'if_modified_since' => 'Thu, 28 May 2026 20:26:40 GMT' ] );
+same( 304, $case['status'], 'If-Modified-Since at or after Last-Modified answers 304' );
+same( '', $case['body'], '304 has no body' );
+
+$case = run_serve_case( [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'working', 'if_modified_since' => 'Wed, 27 May 2026 20:26:40 GMT' ] );
+same( 200, $case['status'], 'an older If-Modified-Since still gets the document' );
+
+// Every withheld state answers 404, and never leaks the document.
+foreach ( [
+	'offering off'                => [ 'path' => '/mdf.json', 'offer' => false, 'negotiation' => 'working' ],
+	'blocked'                     => [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'blocked' ],
+	'unknown, no override'        => [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'unknown' ],
+	'blocked, override present'   => [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'blocked', 'owner_confirmed' => true ],
+] as $label => $spec ) {
+	$case = run_serve_case( $spec );
+	same( 404, $case['status'], $label . ': answers 404' );
+	same( 'application/json; charset=utf-8', header_value( $case['headers'], 'Content-Type' ), $label . ': 404 is JSON' );
+	same( 'no-store', header_value( $case['headers'], 'Cache-Control' ), $label . ': 404 is not cached' );
+	$body = json_decode( $case['body'], true );
+	same( 'unavailable', $body['error'] ?? null, $label . ': names the state' );
+	ok( ! isset( $body['mdf_version'] ), $label . ': the capability document is not leaked' );
+}
+
+$case = run_serve_case( [ 'path' => '/mdf.json', 'offer' => true, 'negotiation' => 'unknown', 'owner_confirmed' => true ] );
+same( 200, $case['status'], 'unknown with the owner override publishes the document' );
+
+// /llms.txt keeps working through the shared responder.
+$case = run_serve_case( [ 'path' => '/llms.txt', 'offer' => true, 'negotiation' => 'working' ] );
+same( 200, $case['status'], 'llms.txt still answers 200' );
+same( 'text/plain; charset=utf-8', header_value( $case['headers'], 'Content-Type' ), 'llms.txt is still text/plain' );
+same( 'nosniff', header_value( $case['headers'], 'X-Content-Type-Options' ), 'llms.txt still sends nosniff' );
+same( '1161', header_value( $case['headers'], 'Content-Length' ), 'llms.txt is still 1161 B on a non-Woo site' );
+
+$case = run_serve_case( [ 'path' => '/llms.txt', 'offer' => true, 'negotiation' => 'working', 'method' => 'HEAD' ] );
+same( 200, $case['status'], 'llms.txt HEAD works' );
+same( '', $case['body'], 'llms.txt HEAD has no body' );
+
+// ---------------------------------------------------------------------------
+group( 'X-MDF-Version: protocol identity on the markdown response and its HTML' );
+// ---------------------------------------------------------------------------
+
+$case = run_serve_case( [
+	'queried_object_id' => 5,
+	'is_singular'       => true,
+	'offer'             => true,
+	'negotiation'       => 'working',
+	'posts'             => [ 5 => [] ],
+	'md'                => [ 5 => 120 ],
+] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'markdown response carries X-MDF-Version: 1' );
+
+$case = run_serve_case( [
+	'queried_object_id' => 5,
+	'is_singular'       => true,
+	'offer'             => true,
+	'negotiation'       => 'unknown',
+	'posts'             => [ 5 => [] ],
+	'md'                => [ 5 => 120 ],
+] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'an unclaimed site does not advertise the protocol family' );
+same( 'text/markdown; charset=utf-8', header_value( $case['headers'], 'Content-Type' ), 'markdown is still served while unconfirmed' );
+
+$case = run_serve_case( [
+	'queried_object_id' => 5,
+	'is_singular'       => true,
+	'offer'             => true,
+	'negotiation'       => 'working',
+	'accept'            => 'text/html',
+	'html_headers'      => true,
+	'posts'             => [ 5 => [] ],
+	'md'                => [ 5 => 120 ],
+] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'HTML at a URL with a variant carries X-MDF-Version' );
+same( 'HTML-FALLBACK', $case['body'], 'the HTML itself is unchanged' );
+
+$case = run_serve_case( [
+	'queried_object_id' => 5,
+	'is_singular'       => true,
+	'offer'             => true,
+	'negotiation'       => 'working',
+	'accept'            => 'text/html',
+	'html_headers'      => true,
+	'posts'             => [ 5 => [] ],
+] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'HTML with no variant carries no protocol header' );
+
+$case = run_serve_case( [
+	'queried_object_id' => 9,
+	'is_singular'       => true,
+	'offer'             => true,
+	'negotiation'       => 'working',
+	'accept'            => 'text/html',
+	'html_headers'      => true,
+	'woo_pages'         => $woo_pages,
+	'posts'             => [ 9 => [] ],
+	'md'                => [ 9 => 40 ],
+] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'an excluded page (shop) carries no protocol header' );
+
+// ---------------------------------------------------------------------------
+group( 'activation: one delayed re-test only for blocked + adapter just registered' );
+// ---------------------------------------------------------------------------
+
+$act = [
+	'activate' => true,
+	'wpsc'     => true,
+	'posts'    => [],
+	'http'     => [],
+];
+
+// blocked, adapter registered by this activation → schedule once.
+$spec = $act;
+$spec['posts'] = [ 21 => [ 'permalink' => 'https://example.test/post-21/' ] ];
+$spec['md']    = [ 21 => 90 ];
+$spec['http']  = [ 'https://example.test/post-21/' => 'text/html' ];
+$r = run_state_case( $spec );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'activation (blocked, adapter registered now) ran', (string) $r['error'] );
+} else {
+	$a = $r['activation'];
+	same( 'blocked', $a['status'], 'blocked is still reported blocked' );
+	same( true, $a['adapter_registered'], 'the adapter was registered during activation' );
+	same( true, $a['delayed_scheduled'], 'one delayed re-test is scheduled' );
+	ok( $a['delayed_scheduled_time'] >= time() + 55, 'the re-test is about a minute out' );
+	same( true, $a['second_call_same_event'], 'a second scheduling call does not add another event' );
+}
+
+// working, adapter registered by this activation → nothing scheduled.
+$spec = $act;
+$spec['posts'] = [ 21 => [ 'permalink' => 'https://example.test/post-21/' ] ];
+$spec['md']    = [ 21 => 90 ];
+$spec['http']  = [ 'https://example.test/post-21/' => 'text/markdown' ];
+$r = run_state_case( $spec );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'activation (working) ran', (string) $r['error'] );
+} else {
+	same( 'working', $r['activation']['status'], 'a working activation stays working' );
+	same( false, $r['activation']['delayed_scheduled'], 'nothing is scheduled when the result is working' );
+}
+
+// blocked, adapter already registered before activation → nothing scheduled.
+$spec = $act;
+$spec['wpsc_adapter_present'] = true;
+$spec['posts'] = [ 21 => [ 'permalink' => 'https://example.test/post-21/' ] ];
+$spec['md']    = [ 21 => 90 ];
+$spec['http']  = [ 'https://example.test/post-21/' => 'text/html' ];
+$r = run_state_case( $spec );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'activation (blocked, adapter already registered) ran', (string) $r['error'] );
+} else {
+	same( 'blocked', $r['activation']['status'], 'a pre-registered adapter does not mask a real block' );
+	same( false, $r['activation']['delayed_scheduled'], 'no re-test when this activation did not register the adapter' );
+}
+
+// blocked, no WP Super Cache at all → nothing scheduled.
+$spec = $act;
+$spec['wpsc']  = false;
+$spec['posts'] = [ 21 => [ 'permalink' => 'https://example.test/post-21/' ] ];
+$spec['md']    = [ 21 => 90 ];
+$spec['http']  = [ 'https://example.test/post-21/' => 'text/html' ];
+$r = run_state_case( $spec );
+if ( isset( $r['error'] ) ) {
+	ok( false, 'activation (blocked, no WP Super Cache) ran', (string) $r['error'] );
+} else {
+	same( false, $r['activation']['delayed_scheduled'], 'no re-test without WP Super Cache' );
+}
+
+// ---------------------------------------------------------------------------
+group( 'admin output: no retired Phase copy, and the new links are present' );
+// ---------------------------------------------------------------------------
+
+$admin = run_state_case( [ 'admin' => true ] );
+if ( isset( $admin['error'] ) ) {
+	ok( false, 'admin render ran', (string) $admin['error'] );
+} else {
+	$html = $admin['admin']['html'];
+
+	same( [], $admin['admin']['errors'], 'settings and dashboard render without error' );
+	ok( strlen( $admin['admin']['settings_len'] ) > 0 && $admin['admin']['settings_len'] > 2000, 'settings page rendered', (string) $admin['admin']['settings_len'] );
+	ok( $admin['admin']['dashboard_len'] > 1000, 'dashboard rendered', (string) $admin['admin']['dashboard_len'] );
+
+	foreach ( [ 'Phase 1', 'Phase 2', 'Phase 3', 'coming soon', 'oracle', 'L402', 'wallet' ] as $retired ) {
+		ok( false === stripos( $html, $retired ), 'admin output has no "' . $retired . '"' );
+	}
+
+	ok( false !== strpos( $html, 'markdownfirst.com' ), 'admin output links markdownfirst.com' );
+	ok( false !== strpos( $html, 'bitcryptic.com' ), 'admin output links BitCryptic' );
+	ok( false !== strpos( $html, 'slepner.com.au' ), 'admin output links Slepner' );
+	ok( false !== strpos( $html, 'github.com/bitcryptic-gw/mdf-analytics-wp' ), 'admin output links the plugin README' );
+	ok( false !== strpos( $html, 'Capability document' ), 'settings states the /mdf.json state' );
+	ok( false !== strpos( $html, 'not earnings' ), 'dashboard says the cards are estimates' );
 }
 
 exit( summary() );
