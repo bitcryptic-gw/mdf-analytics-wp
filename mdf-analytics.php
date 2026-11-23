@@ -908,6 +908,7 @@ function mdf_maybe_serve_markdown(): void {
     if ( $size <= 0 ) return;
 
     // Conditional GET support.
+    $mdf_headers = mdf_negotiation_claim_confirmed();
     $if_mod = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : '';
     if ( $if_mod !== '' ) {
         $if_mod_time = strtotime( $if_mod );
@@ -915,6 +916,9 @@ function mdf_maybe_serve_markdown(): void {
             status_header( 304 );
             header( 'Vary: Accept' );
             header( 'Cache-Control: public, max-age=3600' );
+            if ( $mdf_headers ) {
+                header( 'X-MDF-Version: ' . MDF_PROTOCOL_VERSION );
+            }
             exit;
         }
     }
@@ -934,6 +938,9 @@ function mdf_maybe_serve_markdown(): void {
     header( 'Last-Modified: ' . gmdate( 'D, d M Y H:i:s', $mtime ) . ' GMT' );
     header( 'Vary: Accept' );
     header( 'Cache-Control: public, max-age=3600' );
+    if ( $mdf_headers ) {
+        header( 'X-MDF-Version: ' . MDF_PROTOCOL_VERSION );
+    }
 
     if ( isset( $_SERVER['REQUEST_METHOD'] ) && strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) === 'HEAD' ) {
         exit;
@@ -943,6 +950,52 @@ function mdf_maybe_serve_markdown(): void {
     exit;
 }
 add_action( 'template_redirect', 'mdf_maybe_serve_markdown', 5 );
+
+/**
+ * MDF 0.3.1 requires X-MDF-Version on every response the MDF layer handles,
+ * including the HTML rendering served at a URL where markdown is available.
+ *
+ * Runs after the serve path (priority 5), which exits when it answers with
+ * markdown. Emitted only for the same URLs that have a servable variant, and
+ * only while the site is asserting MDF at all — offering on and negotiation
+ * confirmed. A site that withholds its capability document must not advertise
+ * the protocol family on its HTML either, or a validator would read a
+ * half-claimed site as a defect.
+ */
+function mdf_send_html_mdf_version_header(): void {
+    if ( headers_sent() || ! mdf_negotiation_claim_confirmed() ) {
+        return;
+    }
+    if ( ! is_singular() ) {
+        return;
+    }
+
+    $post_id = (int) get_queried_object_id();
+    if ( $post_id <= 0 ) {
+        return;
+    }
+
+    if (
+        mdf_is_woocommerce_transactional_request()
+        || mdf_excluded_from_markdown( $post_id )
+        || mdf_third_party_no_cache()
+    ) {
+        return;
+    }
+
+    $md_path = mdf_cache_posts_dir() . '/' . $post_id . '.md';
+    if ( ! file_exists( $md_path ) ) {
+        return;
+    }
+
+    $size = filesize( $md_path );
+    if ( false === $size || $size <= 0 ) {
+        return;
+    }
+
+    header( 'X-MDF-Version: ' . MDF_PROTOCOL_VERSION );
+}
+add_action( 'template_redirect', 'mdf_send_html_mdf_version_header', 6 );
 
 // ---------------------------------------------------------------------------
 // Negotiation self-test — does markdown actually reach clients?
