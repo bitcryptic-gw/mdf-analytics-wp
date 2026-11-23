@@ -1,36 +1,18 @@
 # MDF Analytics for WordPress
 
-A WordPress plugin that gives you visibility into AI agent traffic hitting your site — and, since v0.1.4, lets you start serving clean markdown to agents that ask for it.
+MDF Analytics gives AI agents a clean markdown version of each post and page on your WordPress site, at the same URL. An agent that sends `Accept: text/markdown` gets a pre-built CommonMark version of the page; browsers, search engines and human visitors get exactly the page they get today. It also shows you which agents are visiting, and which of them are asking for markdown.
 
-Part of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) ecosystem.
+**Nothing changes for your visitors.** No new URLs, no redirects, no templates to rebuild. Adopting MDF only adds a markdown representation for agents that ask for one — the designed page stays the page.
 
----
+**Nothing leaves your site.** No external API calls, no analytics beacons, no phoning home. All data is stored in your WordPress database and purged after 90 days. The one HTTP request the plugin makes is a loopback self-test to your own site, described under [Negotiation self-test](#negotiation-self-test).
 
-## The problem
+Automated clients are now a large share of page requests. In June 2026, Cloudflare Radar measured bots at **57.5% of HTML page requests** across Cloudflare's network against 42.5% from humans — the first time automated requests crossed into the majority. That figure counts HTML page requests, not all internet traffic ([Cloudflare Radar traffic](https://radar.cloudflare.com/traffic)). Most of those clients get HTML built for human eyes and strip it back down themselves. MDF Analytics gives them the tidy version instead, and shows you the traffic while you decide what to do with it.
 
-Automated clients now account for the majority of web traffic. In June 2026, Cloudflare Radar data showed bots generating 57.5% of HTML requests across Cloudflare's network, against 42.5% from humans — the first time automated requests crossed into the majority. AI agents are the fastest-growing slice of that traffic. Most of them are silently scraping your content, burning tokens to parse HTML, and moving on — with no signal to you and no value exchange in either direction.
-
-MDF proposes a better model: serve clean markdown directly to agents via HTTP content negotiation, with access policy expressed through price. This plugin gives you visibility into that traffic first, and an opt-in path to start serving markdown.
+MDF Analytics is part of the [MDF (Markdown First)](https://github.com/bitcryptic-gw/mdf) ecosystem — see [Part of the MDF ecosystem](#part-of-the-mdf-ecosystem).
 
 ---
 
-## What it does
-
-MDF Analytics classifies every request to your WordPress site — known AI agent, likely automated client, internal/monitor, or human browser — and logs the relevant data. As of v0.1.4, it can also **serve markdown directly**: turn on "Offer markdown to agents" in Settings, and requests sending `Accept: text/markdown` receive a pre-generated CommonMark version of the page instead of HTML, at the same URL (`Vary: Accept`). Browsers are unaffected.
-
-The dashboard shows you:
-
-- How many AI agents are hitting your site, and which ones
-- Whether any are already sending `Accept: text/markdown` headers
-- What you would have earned if you'd been serving *paid* markdown content (payments are not implemented — see [Paid markdown (planned)](#paid-markdown-planned))
-- A daily trend chart of inbound agent traffic
-- A separate table for internal/monitor traffic (uptime checkers, WordPress core calls) so they don't inflate your agent counts
-
-**Nothing leaves your site.** No external API calls, no analytics beacons, no phoning home. All data is stored in your WordPress database and purged after 90 days.
-
----
-
-## Installation
+## Install
 
 The plugin is **multi-file** — it ships a vendored, namespaced copy of `league/html-to-markdown` in `vendor/`, which `mdf-analytics.php` requires to load.
 
@@ -45,13 +27,37 @@ The plugin is **multi-file** — it ships a vendored, namespaced copy of `league
 
 ### Alternative: install from the source archive
 
-**Code ▸ Download ZIP** on this repository also produces a working install — `vendor/` is source-committed, so no Composer step is required. Note that GitHub names the source archive after the repository and branch, so it extracts to a plugin directory called `mdf-analytics-wp-main/` rather than `mdf-analytics/`. This matters if you later need to locate the plugin's bundled `llms.txt` (see below) or reference the plugin path in server config.
+**Code ▸ Download ZIP** on this repository also produces a working install — `vendor/` is source-committed, so no Composer step is required. Note that GitHub names the source archive after the repository and branch, so it extracts to a plugin directory called `mdf-analytics-wp-main/` rather than `mdf-analytics/`. This matters if you later need to locate the plugin's bundled `llms.txt` (see [llms.txt serving](#llmstxt-serving)) or reference the plugin path in server config.
 
-### After activation
+---
 
-The plugin starts logging immediately. To also serve markdown to agents, go to **Settings** and enable **"Offer markdown to agents."**
+## Turn it on
+
+The plugin starts logging immediately after activation. To also serve markdown to agents, go to **Settings** and enable **"Offer markdown to agents."**
 
 > **Markdown does not start serving instantly.** Enabling the toggle queues a background backfill that converts your published posts and pages to markdown. Until that backfill completes — typically a few minutes on a small site, longer on large ones — your pages will continue to return HTML even to agents sending `Accept: text/markdown`. This is by design: markdown is never served for a URL until a pre-built file exists for it. The Settings page shows a coverage line ("N of M published posts/pages have a cached markdown version") so you can watch progress.
+
+---
+
+## Check it works
+
+Once the backfill has finished, ask for a page as an agent would:
+
+```bash
+curl -sI -H 'Accept: text/markdown' https://example.com/some-post/
+```
+
+The response should carry (the status line and header order vary by server):
+
+```
+HTTP/2 200
+content-type: text/markdown; charset=utf-8
+vary: Accept
+```
+
+If you get `text/html` and no `vary: Accept`, one of three things is happening: markdown offering is off, that URL has no cached markdown yet (backfill still running, or the content was published after the backfill), or something in front of WordPress — a page cache or a CDN — is answering with a stored HTML page before the plugin runs. The third case is what the negotiation self-test exists to catch; see [Negotiation self-test](#negotiation-self-test) and [Page caches](#page-caches).
+
+To see whether agents are actually asking, open the dashboard.
 
 ---
 
@@ -63,56 +69,77 @@ The plugin starts logging immediately. To also serve markdown to agents, go to *
 
 | Card | What it means |
 |------|---------------|
-| Total logged requests | All non-human, non-asset requests in the selected window |
-| Known AI agents | Matched against a curated list of ~40 known agent UA fragments |
+| Total logged requests | All logged requests in the selected window. Ordinary human browser traffic and asset requests are not logged |
+| Known AI agents | Matched against a curated list of known agent UA fragments — AI assistants, agentic frameworks, search crawlers, common HTTP client libraries |
 | Likely automated | No browser engine markers, not a known agent — probably a script or framework |
-| Internal / monitors | WordPress core, uptime monitors, CDN health probes — excluded from earnings |
+| Internal / monitors | WordPress core, uptime monitors, CDN health probes — logged, but excluded from all agent counts and earnings figures |
 | Wanted markdown | Requests that included `Accept: text/markdown` |
-| Estimated earned | What you'd have received if markdown was live and priced at your configured rate |
-| Estimated missed | What inbound agents could have paid — the opportunity cost |
+| Estimated earned | **Estimate only** — markdown requests in the window multiplied by your configured rate. No payment is taken |
+| Estimated missed | **Estimate only** — agent requests that did not ask for markdown, multiplied by your configured rate. An opportunity-cost figure, not money owed |
 
 ### Time windows
 
 Switch between last 7, 30, or 90 days. Default is 30 days.
 
-### Settings
+Below the cards are a daily trend chart of inbound agent traffic, a **Top agents** table, a separate **Internal / monitors** table (so uptime checkers and WordPress core calls don't inflate your agent counts), and a **Top markdown-requested paths** table.
 
-Configure your preferred currency (sats via Lightning or USDC via Base) and the per-request rate used for estimated earnings calculations. The defaults are 1 sat and $0.001 USDC — broadly in line with MDF micropayment tier pricing.
+---
+
+## Settings
+
+Configure the currency used for earnings estimates (sats via Lightning, or USDC via Base) and the per-request rate the estimates multiply by. The defaults are 1 sat and $0.001 USDC — broadly in line with MDF micropayment tier pricing. These values only affect the two estimate cards; nothing is charged.
 
 This is also where you enable **"Offer markdown to agents"** — the toggle that turns on markdown serving for requests sending `Accept: text/markdown`. When enabled, a coverage status line below the toggle reports backfill progress while it runs, and cached-vs-published counts once it completes.
 
-Below that, a **negotiation status** tells you whether markdown actually reaches clients, and whether the machine-readable claim in the bundled `/llms.txt` is being **published** or **withheld**. The self-test probes up to three qualifying **clean-path** URLs (front page first, then the most recently modified published, publicly viewable, password-free content with a non-empty cached `.md`). Query-string permalinks are excluded, because a query string makes the page cache stand aside and would test the wrong path. Each URL is confirmed publicly reachable, then requested in **both** `Accept-Encoding` variants — the default (gzip) and `identity` — because the page-cache key differs by encoding. Outcomes: **working** (every reachable probe in both encodings returned markdown, so the claim is published), **blocked** (one or more probes returned HTML — a page cache is serving cached pages to agents; the URL and encoding are named and the claim is withheld), and **unknown** (the loopback failed or no probe URL was reachable — normal on many hosts, never reported as blocked, claim withheld). The test runs on activation, when the toggle is switched on, once a day, and from the **Re-test now** button; it never runs on a normal page load.
+Below that, a **negotiation status** tells you whether markdown actually reaches clients, and whether the machine-readable claim in the bundled `/llms.txt` is being **published** or **withheld** — see [Negotiation self-test](#negotiation-self-test).
+
+The same page also has an **llms.txt editor** — see [llms.txt serving](#llmstxt-serving).
+
+---
+
+## Negotiation self-test
+
+The self-test probes up to three qualifying **clean-path** URLs (front page first, then the most recently modified published, publicly viewable, password-free content with a non-empty cached `.md`). Query-string permalinks are excluded, because a query string makes the page cache stand aside and would test the wrong path. Each URL is confirmed publicly reachable, then requested in **both** `Accept-Encoding` variants — the default (gzip) and `identity` — because the page-cache key differs by encoding.
+
+Outcomes:
+
+- **working** — every reachable probe in both encodings returned markdown, so the claim is published.
+- **blocked** — one or more probes returned HTML. A page cache is serving cached pages to agents; the URL and encoding are named and the claim is withheld.
+- **unknown** — the loopback failed or no probe URL was reachable. Normal on many hosts, never reported as blocked, claim withheld.
 
 On a WooCommerce site the self-test also sends **negative probes**: the cart, checkout and account URLs and one account endpoint are requested in both encodings with `Accept: text/markdown`. Those pages must never answer with markdown, so any markdown response there reports **blocked**, naming the URL and encoding — the claim is withheld regardless of what the positive probes found.
 
+The test runs on activation, when the toggle is switched on, once a day, and from the **Re-test now** button; it never runs on a normal page load.
+
 When offering is on but the self-test cannot confirm (**unknown** — common on hosts that block loopback HTTP), the page offers an **"I have verified markdown negotiation myself"** checkbox, next to the exact `curl` command to run against your own URL and the response to expect (`content-type: text/markdown` and `Vary: Accept`). Ticking it publishes the claim on your authority; it is cleared automatically if you switch markdown offering off or if a later self-test reports blocked. The status always states plainly whether the claim is published or withheld, and why.
 
-The same page also has an **llms.txt editor** (as of v0.1.10) — see [llms.txt serving](#llmstxt-serving) below.
+---
 
-### llms.txt serving
+## llms.txt serving
 
 The plugin ships a generic `llms.txt` template in the plugin directory, used as the **default template**, and serves it virtually at the site root (`/llms.txt`) — nothing is ever written to your WordPress installation's actual root directory.
 
-**To customise it, use the "llms.txt" editor on the plugin's Settings page** (as of v0.1.10). The editor is prefilled with the current effective content — your saved custom content if you have any, otherwise the bundled default template. Saving stores your content in the database, so it survives plugin upgrades; a "Reset to default" button discards your saved content and reverts to the bundled template. The "Machine-readable content" section at the bottom of the template, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing. Changes are picked up immediately by the virtual handler, though served copies may be cached by browsers and proxies for up to an hour.
+**To customise it, use the "llms.txt" editor on the plugin's Settings page.** The editor is prefilled with the current effective content — your saved custom content if you have any, otherwise the bundled default template. Saving stores your content in the database, so it survives plugin upgrades; a "Reset to default" button discards your saved content and reverts to the bundled template. The "Machine-readable content" section at the bottom of the template, which tells agents this site negotiates markdown via `Accept: text/markdown`, doesn't need editing. Changes are picked up immediately by the virtual handler, though served copies may be cached by browsers and proxies for up to an hour.
 
-The bundled file in the plugin directory is the read-only default template. Editing it directly is no longer the supported path and **those edits are overwritten when you upgrade the plugin** — copy any customisation you made to the bundled file before upgrading to v0.1.10, then paste it into the editor.
+The bundled file in the plugin directory is the read-only default template. Editing it directly is no longer the supported path: **those edits are overwritten when you upgrade the plugin.** If you customised the bundled file under an older version, paste that content into the editor.
 
 The bundled default's "Machine-readable content" section is served **only when markdown offering is enabled and negotiation is confirmed** — by the self-test (`working`) or by your own override. In every other case (offering off, **blocked**, or unconfirmed **unknown**) the bundled default is served with that section replaced by a neutral, attribution-only "About this file" section, because the plugin will not assert a capability the site has not been shown to have. **Content you saved in the editor is always served verbatim** in every state; the plugin surfaces any mismatch as an admin warning instead of altering your text. When the claim is confirmed, the bundled template is served byte-for-byte unchanged.
 
 On a WooCommerce site whose claim is published, the bundled default template also carries a short **Session-only pages** section, stating that the cart, checkout and account pages and their endpoints are served as HTML only and never as markdown — so the file never implies markdown is available for a page that has none. This applies to the bundled default; content you saved in the editor is served verbatim in every state, as above.
 
-**If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy — default or saved — is silently shadowed and never seen — this is standard static-file precedence, not a bug. As of v0.1.8, the plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The same warning appears inside the llms.txt editor. The plugin never reads, edits, or deletes your existing file.
+**If your site already has a real, static `llms.txt` file at the web root:** the web server serves that file directly, before WordPress ever runs, so the plugin's own copy — default or saved — is silently shadowed and never seen. This is standard static-file precedence, not a bug. The plugin detects this at activation (and keeps rechecking) and shows a dismissible admin notice explaining that your existing file takes priority, with a one-click copy of just the "Machine-readable content" snippet so you can add markdown-negotiation support to your existing file by hand if you want it. The same warning appears inside the llms.txt editor. The plugin never reads, edits, or deletes your existing file.
 
 Requests to `/llms.txt` (the plugin's own virtual copy) appear in the analytics dashboard alongside other agent traffic, classified through the same visitor classifier.
 
 **On uninstall** (not deactivation — deactivating leaves everything in place), the plugin removes its own data: the database table, all generated markdown cache files, and its options (including any saved llms.txt content). It never touches a web-root `llms.txt`, static or otherwise, since it never created one.
-
 
 ---
 
 ## Markdown serving
 
 The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header; all other requests receive HTML as normal, with no `Vary` header added.
+
+Conversion is handled by the vendored `league/html-to-markdown` library. Responses support conditional GET (`If-Modified-Since`) and HEAD, and are marked publicly cacheable for an hour.
 
 ### What is never served as markdown
 
@@ -131,12 +158,16 @@ On a WooCommerce site the cart, checkout (with its `order-pay` and `order-receiv
 
 On upgrade from 0.1.13 the activation hook deletes any `.md` file already cached for those pages and records what it removed in the `mdf_exclusion_cleanup` option.
 
-Conversion is handled by the vendored `league/html-to-markdown` library.
-
 ### Known limitations
 
-- **WP Super Cache — reverse race condition (addressable, see below).** The plugin sets `DONOTCACHEPAGE` before serving markdown, which stops WPSC from caching a markdown response under a key that could later be served to HTML requesters. The *reverse* direction — WPSC caching the **HTML** response first and then serving it to `Accept: text/markdown` requests, because `wpsc_get_accept_header()` maps `text/markdown` to `text/html` — is addressed by the bundled adapter described in [WP Super Cache adapter](#wp-super-cache-adapter), except in WP Super Cache's Expert (mod_rewrite) mode. If you run WP Super Cache in that mode, or run another page cache or CDN, use the negotiation self-test on the Settings page to see whether markdown is actually reaching agents.
 - **Escaped characters in the raw markdown.** Conversion writes a literal ampersand as `&amp;`, and `<` / `>` as `&lt;` / `&gt;`. That is correct markdown — it renders identically in a browser and avoids an unescaped `&` being read as the start of an entity — but an agent reading the raw text sees the escape where a human sees `&`. Other HTML entities such as `&eacute;` or `&hellip;` are decoded to the character they represent.
+- **Page caches.** A page cache that serves stored HTML before WordPress runs can answer a markdown request with HTML. WP Super Cache in its standard mode is handled by the bundled adapter; other caches, CDNs and WP Super Cache's Expert mode are not. See [Page caches](#page-caches), and use the [negotiation self-test](#negotiation-self-test) to see whether markdown is actually reaching agents on your setup.
+
+---
+
+## Page caches
+
+Serving markdown depends on the request reaching PHP. A page cache that answers from disk before WordPress loads will hand an agent the stored HTML, and the plugin never gets a chance to negotiate.
 
 ### WP Super Cache adapter
 
@@ -146,7 +177,9 @@ MDF Analytics ships a small adapter, `mdf-supercache-adapter.php`, **inside its 
 
 The adapter hooks WP Super Cache's `cache_init` action and, when the request is a GET/HEAD carrying `Accept: text/markdown` (case-insensitive), sets WP Super Cache's `$cache_enabled = false` and defines `DONOTCACHEPAGE`. Phase 1 checks `$cache_enabled` immediately after `cache_init` and returns before serving anything, and `wp_cache_postload()` returns before the output-buffer callback is installed — so a markdown request **neither reads nor writes** the page cache. That is the point. An earlier design gave markdown requests their own cache key via a marker; a marked request that fell through to normal HTML rendering (no cached `.md` yet) was cached under the markdown key and then served to every later markdown request. A total bypass cannot do that, needs no marker and no separate key, and is independent of encoding. Requests that are not markdown are touched in no way, so browser behaviour is bit-for-bit identical; missing, non-string and oversized `Accept` values are treated as "not markdown"; GET and HEAD only. Marker-keyed entries left behind by earlier versions are never read again and expire on their own — no cleanup is required.
 
-**Expert (mod_rewrite) mode.** If WP Super Cache is configured in Expert mode, Apache serves the cached HTML file directly from `.htaccess` before any PHP runs, so no adapter can fix it. The plugin detects this and says so in the Settings status rather than claiming a fix. To handle markdown requests yourself, add a condition that skips the supercache rewrite when the `Accept` header asks for markdown — for example, add the following to **each** `RewriteCond` block that serves a `supercache` file, before the existing `RewriteRule`:
+### Expert (mod_rewrite) mode
+
+If WP Super Cache is configured in Expert mode, Apache serves the cached HTML file directly from `.htaccess` before any PHP runs, so no adapter can fix it. The plugin detects this and says so in the Settings status rather than claiming a fix. To handle markdown requests yourself, add a condition that skips the supercache rewrite when the `Accept` header asks for markdown — for example, add the following to **each** `RewriteCond` block that serves a `supercache` file, before the existing `RewriteRule`:
 
 ```apache
 RewriteCond %{HTTP:Accept} !text/markdown [NC]
@@ -202,6 +235,8 @@ For an end-to-end check against a real WordPress + WooCommerce + WP Super Cache,
 run the throwaway Docker stack described in the task record for the release you
 are testing.
 
+---
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
@@ -230,4 +265,4 @@ No Composer or npm runtime dependency — the plugin ships its dependencies vend
 
 ## License
 
-MIT — copyright Gary Walker (BitCryptic™) and Graham Hall (Slepner).
+MIT — copyright Gary Walker (BitCryptic™) and Graham Hall (Slepner). See [LICENSE](LICENSE).
