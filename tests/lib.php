@@ -164,3 +164,17 @@ function header_value( array $headers, string $name ): string {
 	}
 	return '';
 }
+
+/**
+ * Number of response header lines with this name. Used to prove a header is
+ * sent exactly once when both the adapter and the plugin could send it.
+ */
+function header_count( array $headers, string $name ): int {
+	$count = 0;
+	foreach ( $headers as $line ) {
+		if ( 0 === stripos( $line, $name . ':' ) ) {
+			$count++;
+		}
+	}
+	return $count;
+}

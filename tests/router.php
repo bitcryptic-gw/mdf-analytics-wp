@@ -65,6 +65,35 @@ if ( isset( $spec['accept'] ) ) {
 	$_SERVER['HTTP_ACCEPT'] = $spec['accept'];
 }
 
+// The WP Super Cache adapter, as wp-cache-phase1.php includes it: no
+// WordPress bootstrap, only the marker files on disk.
+if ( ! empty( $spec['adapter'] ) ) {
+	require_once dirname( __DIR__ ) . '/mdf-supercache-adapter.php';
+
+	$_SERVER['REQUEST_URI'] = (string) ( $spec['uri'] ?? '/' );
+
+	foreach ( (array) ( $spec['adapter_markers'] ?? [] ) as $marker_path ) {
+		mdf_write_path_marker( (string) $marker_path );
+	}
+
+	$flag = mdf_confirmed_flag_path();
+	if ( ! empty( $spec['adapter_confirmed'] ) ) {
+		mdf_sync_confirmed_flag();
+	} elseif ( file_exists( $flag ) ) {
+		@unlink( $flag );
+	}
+
+	mdf_wpsc_send_cached_html_version();
+
+	if ( ! empty( $spec['also_plugin_header'] ) ) {
+		mdf_send_html_mdf_version_header();
+	}
+
+	header( 'Content-Type: text/html; charset=UTF-8' );
+	echo 'CACHED-HTML';
+	return;
+}
+
 // Discovery documents: /llms.txt and /mdf.json are answered by their own
 // handlers, which exit when they serve. They match on REQUEST_URI.
 if ( ! empty( $spec['path'] ) ) {

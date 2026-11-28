@@ -316,4 +316,139 @@ if ( ! empty( $spec['normalise'] ) ) {
 	];
 }
 
+if ( ! empty( $spec['markers'] ) ) {
+	$m  = (array) $spec['markers'];
+	$id = (int) ( $m['convert_id'] ?? 0 );
+	$out['markers'] = [];
+
+	// save_post only touches markers while offering is on.
+	$GLOBALS['mdf_test']['options']['mdf_offer_markdown'] = true;
+
+	$out['markers']['convert'] = mdf_convert_post( $id );
+	$out['markers']['marker_after_convert'] = mdf_marker_exists( (string) $m['old_path'] );
+	$out['markers']['sidecar_after_convert'] = mdf_sidecar_read( $id );
+
+	// Slug change: the old marker must go, the new one must arrive.
+	$post = get_post( $id );
+	if ( $post instanceof WP_Post ) {
+		$post->permalink = (string) $m['new_slug_permalink'];
+	}
+	mdf_on_save_post( $id, get_post( $id ), true );
+	$out['markers']['old_gone_after_slug_change'] = ! mdf_marker_exists( (string) $m['old_path'] );
+	$out['markers']['new_present_after_slug_change'] = mdf_marker_exists( (string) $m['new_slug_path'] );
+
+	// Permalink structure change: rebuild every marker.
+	$post = get_post( $id );
+	if ( $post instanceof WP_Post ) {
+		$post->permalink = (string) $m['structure_permalink'];
+	}
+	$out['markers']['rebuild'] = mdf_rebuild_all_markers();
+	$out['markers']['old_gone_after_rebuild'] = ! mdf_marker_exists( (string) $m['new_slug_path'] );
+	$out['markers']['new_present_after_rebuild'] = mdf_marker_exists( (string) $m['structure_path'] );
+
+	// Trash removes it; republish restores it while the variant is servable.
+	mdf_on_post_transition( 'trash', 'publish', get_post( $id ) );
+	$out['markers']['gone_after_trash'] = ! mdf_marker_exists( (string) $m['structure_path'] );
+	mdf_on_post_transition( 'publish', 'trash', get_post( $id ) );
+	$out['markers']['back_after_republish'] = mdf_marker_exists( (string) $m['structure_path'] );
+
+	// Delete removes it.
+	mdf_on_post_unavailable( $id );
+	$out['markers']['gone_after_delete'] = ! mdf_marker_exists( (string) $m['structure_path'] );
+}
+
+if ( ! empty( $spec['markers_zero'] ) ) {
+	$id = (int) $spec['markers_zero'];
+	$out['markers_zero'] = [
+		'converted' => mdf_convert_post( $id ),
+		'marker'    => mdf_marker_exists( (string) ( $spec['markers_zero_path'] ?? '/post-' . $id . '/' ) ),
+		'md_size'   => (int) @filesize( mdf_cache_posts_dir() . '/' . $id . '.md' ),
+	];
+}
+
+if ( ! empty( $spec['markers_exclusion'] ) ) {
+	// A variant cached before an object became excluded: the 0.1.14 cleanup
+	// path must remove the marker as well as the files.
+	$id = (int) $spec['markers_exclusion'];
+	mdf_test_write_md( $id, "stale\n" );
+	mdf_mark_post_servable( $id );
+	$before = mdf_marker_exists( (string) $spec['markers_exclusion_path'] );
+	mdf_upgrade_exclusion_cleanup();
+	$out['markers_exclusion'] = [
+		'before' => $before,
+		'after'  => mdf_marker_exists( (string) $spec['markers_exclusion_path'] ),
+		'md'     => file_exists( mdf_cache_posts_dir() . '/' . $id . '.md' ),
+	];
+}
+
+if ( ! empty( $spec['flag'] ) ) {
+	$states = [];
+
+	$run = static function ( array $options ) {
+		$GLOBALS['mdf_test']['options'] = $options;
+		return [
+			'option' => mdf_sync_confirmed_flag(),
+			'file'   => file_exists( mdf_confirmed_flag_path() ),
+		];
+	};
+
+	$states['offering_off'] = $run( [] );
+
+	$states['working'] = $run( [
+		'mdf_offer_markdown'     => true,
+		'mdf_negotiation_status' => [ 'status' => 'working', 'checked' => time(), 'detail' => '' ],
+	] );
+
+	$states['blocked'] = $run( [
+		'mdf_offer_markdown'     => true,
+		'mdf_negotiation_status' => [ 'status' => 'blocked', 'checked' => time(), 'detail' => '' ],
+	] );
+
+	$states['unknown'] = $run( [
+		'mdf_offer_markdown'     => true,
+		'mdf_negotiation_status' => [ 'status' => 'unknown', 'checked' => time(), 'detail' => '' ],
+	] );
+
+	$states['unknown_owner'] = $run( [
+		'mdf_offer_markdown'       => true,
+		'mdf_negotiation_status'   => [ 'status' => 'unknown', 'checked' => time(), 'detail' => '' ],
+		MDF_OWNER_CONFIRMED_OPTION => true,
+	] );
+
+	$states['blocked_owner'] = $run( [
+		'mdf_offer_markdown'       => true,
+		'mdf_negotiation_status'   => [ 'status' => 'blocked', 'checked' => time(), 'detail' => '' ],
+		MDF_OWNER_CONFIRMED_OPTION => true,
+	] );
+
+	$out['flag'] = $states;
+}
+
+if ( ! empty( $spec['adapter_agreement'] ) ) {
+	require_once dirname( __DIR__ ) . '/mdf-supercache-adapter.php';
+
+	$pairs = [];
+	foreach ( (array) $spec['adapter_agreement'] as $input ) {
+		$pairs[ $input ] = [
+			'plugin'  => mdf_normalise_path_for_marker( (string) $input ),
+			'adapter' => mdf_wpsc_normalise_path( (string) $input ),
+			'plugin_key'  => mdf_marker_key( (string) $input ),
+			'adapter_key' => hash( 'sha256', mdf_wpsc_normalise_path( (string) $input ) ),
+		];
+	}
+	$out['adapter_agreement'] = $pairs;
+}
+
+if ( ! empty( $spec['marker_upgrade'] ) ) {
+	foreach ( (array) $spec['marker_upgrade'] as $id => $size ) {
+		mdf_test_write_md( (int) $id, $size > 0 ? str_repeat( 'x', (int) $size ) : '' );
+	}
+
+	$out['marker_upgrade'] = [
+		'record' => mdf_upgrade_marker_store(),
+		'option' => get_option( 'mdf_marker_upgrade' ),
+		'flag'   => file_exists( mdf_confirmed_flag_path() ),
+	];
+}
+
 echo json_encode( $out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ), "\n";

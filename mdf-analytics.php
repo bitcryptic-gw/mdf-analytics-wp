@@ -269,6 +269,370 @@ function mdf_content_hash( string $content ): string {
 }
 
 // ---------------------------------------------------------------------------
+// Cached-HTML version markers — written here, read by the WP Super Cache adapter
+//
+// A page cache answers from disk without loading WordPress, so neither the
+// plugin's header code nor the database runs on that path. The plugin leaves a
+// small marker on disk for every URL that has a servable markdown variant, plus
+// one flag that exists only while the site's MDF claim is confirmed. The bundled
+// adapter stats both during WP Super Cache's phase 1 and adds X-MDF-Version only
+// when they agree.
+//
+// Location: <content dir>/mdf-cache-markers/. Deliberately not under
+// wp-content/uploads, because uploads can be relocated (UPLOADS / upload_path)
+// and the adapter cannot read those options without WordPress or the database;
+// and deliberately not inside WP Super Cache's cache directory, because
+// "Delete cache" would wipe the markers. The content directory comes from
+// WP_CONTENT_DIR (or from the adapter file's own location), which needs no
+// WordPress state at all.
+//
+// Key: the sha256 of the normalised request path. Raw request bytes never
+// become a filesystem path — only a hash does.
+// ---------------------------------------------------------------------------
+
+/**
+ * Directory that holds the markers and the confirmed flag.
+ */
+function mdf_marker_dir(): string {
+    return rtrim( WP_CONTENT_DIR, '/\\' ) . '/mdf-cache-markers';
+}
+
+/**
+ * The flag file that exists only while the MDF claim is confirmed.
+ */
+function mdf_confirmed_flag_path(): string {
+    return mdf_marker_dir() . '/confirmed';
+}
+
+/**
+ * Normalise a URL or request path to the marker key form.
+ *
+ * Rule (the WP Super Cache adapter implements the same rule in
+ * mdf_wpsc_normalise_path(); the test suite asserts the two agree):
+ *
+ *   - the path component only: query string and fragment are dropped;
+ *   - a leading slash is guaranteed, and an empty path is the front page '/';
+ *   - percent-escape hex digits are uppercased, so %c3%a9 and %C3%A9 match;
+ *   - trailing slashes are stripped, so /about/ and /about match, with the
+ *     front page staying '/';
+ *   - nothing is percent-decoded and duplicate slashes are not collapsed, so
+ *     an odd or ambiguous path (%2e%2e, //, %00) simply fails to match a
+ *     marker. A mismatch can only ever cost a header, never add one for a URL
+ *     that has no variant.
+ */
+function mdf_normalise_path_for_marker( string $path_or_url ): string {
+    $path = $path_or_url;
+
+    if ( false !== strpos( $path, '://' ) ) {
+        $parsed = wp_parse_url( $path, PHP_URL_PATH );
+        $path   = is_string( $parsed ) ? $parsed : '';
+    }
+
+    $cut  = strcspn( $path, '?#' );
+    $path = substr( $path, 0, $cut );
+
+    $path = (string) preg_replace_callback(
+        '/%[0-9a-fA-F]{2}/',
+        static function ( $matches ) {
+            return strtoupper( $matches[0] );
+        },
+        $path
+    );
+
+    if ( '' === $path ) {
+        return '/';
+    }
+
+    if ( '/' !== $path[0] ) {
+        $path = '/' . $path;
+    }
+
+    $path = rtrim( $path, '/' );
+
+    return '' === $path ? '/' : $path;
+}
+
+/**
+ * Marker key: sha256 of the normalised path.
+ */
+function mdf_marker_key( string $path_or_url ): string {
+    return hash( 'sha256', mdf_normalise_path_for_marker( $path_or_url ) );
+}
+
+/**
+ * Path of the marker file for a URL or path.
+ */
+function mdf_marker_file( string $path_or_url ): string {
+    return mdf_marker_dir() . '/' . mdf_marker_key( $path_or_url ) . '.path';
+}
+
+/**
+ * Create the marker directory (0755) with a listing guard (0644).
+ */
+function mdf_create_marker_dir(): void {
+    $dir = mdf_marker_dir();
+
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+    }
+
+    mdf_chmod_dir( $dir );
+
+    $index = $dir . '/index.html';
+    if ( ! file_exists( $index ) ) {
+        file_put_contents( $index, '' );
+    }
+    mdf_chmod_file( $index );
+}
+
+/**
+ * Write a marker atomically at 0644. Presence is the whole payload.
+ */
+function mdf_write_path_marker( string $path_or_url ): bool {
+    mdf_create_marker_dir();
+
+    $file = mdf_marker_file( $path_or_url );
+    $tmp  = $file . '.' . getmypid() . '.tmp';
+
+    if ( file_put_contents( $tmp, '' ) === false ) {
+        return false;
+    }
+
+    mdf_chmod_file( $tmp );
+
+    if ( ! @rename( $tmp, $file ) ) {
+        @unlink( $tmp );
+        return false;
+    }
+
+    mdf_chmod_file( $file );
+
+    return true;
+}
+
+/**
+ * Remove the marker for a URL or path, if present.
+ */
+function mdf_delete_path_marker( string $path_or_url ): void {
+    $file = mdf_marker_file( $path_or_url );
+
+    if ( file_exists( $file ) ) {
+        @unlink( $file );
+    }
+}
+
+/**
+ * Whether a marker exists for a URL or path.
+ */
+function mdf_marker_exists( string $path_or_url ): bool {
+    return file_exists( mdf_marker_file( $path_or_url ) );
+}
+
+/**
+ * The permalink path an object should be marked under, or '' when it cannot
+ * be identified by path alone.
+ *
+ * Plain (query-string) permalinks carry the object identity in the query
+ * string, so every permalink would normalise to the front page '/'. Marking
+ * those would produce a false header on the front page, so they are withheld
+ * instead — the safe direction.
+ */
+function mdf_post_marker_path( int $post_id ): string {
+    $permalink = get_permalink( $post_id );
+
+    if ( ! is_string( $permalink ) || '' === $permalink ) {
+        return '';
+    }
+
+    $query = wp_parse_url( $permalink, PHP_URL_QUERY );
+    if ( is_string( $query ) && '' !== $query ) {
+        return '';
+    }
+
+    $path = wp_parse_url( $permalink, PHP_URL_PATH );
+
+    return is_string( $path ) ? mdf_normalise_path_for_marker( $path ) : '';
+}
+
+/**
+ * Record that an object has a servable variant: write its marker and store the
+ * path in the sidecar so a later slug or permalink change can find it again.
+ */
+function mdf_mark_post_servable( int $post_id ): void {
+    $path = mdf_post_marker_path( $post_id );
+
+    if ( '' === $path ) {
+        mdf_unmark_post( $post_id );
+        return;
+    }
+
+    mdf_write_path_marker( $path );
+
+    $sidecar = mdf_sidecar_read( $post_id );
+    if ( is_array( $sidecar ) ) {
+        $sidecar['permalink_path'] = $path;
+        $sidecar['marker']         = mdf_marker_key( $path ) . '.path';
+        mdf_sidecar_write( $post_id, $sidecar );
+    }
+}
+
+/**
+ * Remove an object's marker, using both the path recorded in the sidecar (the
+ * old permalink, after a slug change) and the current permalink.
+ */
+function mdf_unmark_post( int $post_id ): void {
+    $sidecar = mdf_sidecar_read( $post_id );
+
+    if ( is_array( $sidecar ) && ! empty( $sidecar['permalink_path'] ) ) {
+        mdf_delete_path_marker( (string) $sidecar['permalink_path'] );
+    }
+
+    $path = mdf_post_marker_path( $post_id );
+    if ( '' !== $path ) {
+        mdf_delete_path_marker( $path );
+    }
+}
+
+/**
+ * Bring an object's marker in line with what is on disk right now, without
+ * rewriting the variant. Used when the content is unchanged but the object
+ * became servable again (untrash, republish) or when a marker went missing.
+ */
+function mdf_marker_self_heal( int $post_id ): void {
+    $md = mdf_cache_posts_dir() . '/' . $post_id . '.md';
+
+    clearstatcache( true, $md );
+    $size = is_file( $md ) ? filesize( $md ) : false;
+
+    if ( false !== $size && $size > 0 && ! mdf_excluded_from_markdown( $post_id ) ) {
+        mdf_mark_post_servable( $post_id );
+        return;
+    }
+
+    mdf_unmark_post( $post_id );
+}
+
+/**
+ * Create or remove the confirmed flag to match the current claim state.
+ *
+ * Called from every place the claim can change: the self-test (including the
+ * delayed re-test), activation, the settings form (offering toggle and owner
+ * override), the upgrade path, and an admin-load self-heal so a change made
+ * directly in the database is picked up on the next admin request.
+ *
+ * @return bool Whether the flag exists afterwards.
+ */
+function mdf_sync_confirmed_flag(): bool {
+    $confirmed = mdf_negotiation_claim_confirmed();
+    $flag      = mdf_confirmed_flag_path();
+
+    if ( $confirmed ) {
+        mdf_create_marker_dir();
+        if ( ! file_exists( $flag ) ) {
+            $tmp = $flag . '.' . getmypid() . '.tmp';
+            if ( file_put_contents( $tmp, '' ) !== false ) {
+                mdf_chmod_file( $tmp );
+                if ( @rename( $tmp, $flag ) ) {
+                    mdf_chmod_file( $flag );
+                } else {
+                    @unlink( $tmp );
+                }
+            }
+        }
+        return file_exists( $flag );
+    }
+
+    if ( file_exists( $flag ) ) {
+        @unlink( $flag );
+    }
+
+    return false;
+}
+
+/**
+ * Whether the adapter's marker store is present and readable. Fail-safe: a
+ * false result means no cached HTML can carry the header.
+ */
+function mdf_marker_store_readable(): bool {
+    return is_dir( mdf_marker_dir() ) && is_readable( mdf_marker_dir() );
+}
+
+/**
+ * Rebuild every marker from the current state.
+ *
+ * Used on a permalink-structure change, on a change to post-type visibility,
+ * and by the 0.1.15 → 0.1.16 upgrade. Existing markers are cleared first so a
+ * stale key for a URL that no longer has a variant cannot survive.
+ *
+ * @return array{markers:int,skipped:int,confirmed:bool}
+ */
+function mdf_rebuild_all_markers(): array {
+    mdf_create_marker_dir();
+
+    foreach ( (array) glob( mdf_marker_dir() . '/*.path' ) as $file ) {
+        @unlink( $file );
+    }
+
+    $written = 0;
+    $skipped = 0;
+
+    foreach ( mdf_list_cached_post_ids() as $post_id ) {
+        $post_id = (int) $post_id;
+        $md      = mdf_cache_posts_dir() . '/' . $post_id . '.md';
+
+        clearstatcache( true, $md );
+        $size = is_file( $md ) ? filesize( $md ) : false;
+
+        if ( false === $size || $size <= 0 || mdf_excluded_from_markdown( $post_id ) ) {
+            mdf_unmark_post( $post_id );
+            $skipped++;
+            continue;
+        }
+
+        $path = mdf_post_marker_path( $post_id );
+        if ( '' === $path ) {
+            mdf_unmark_post( $post_id );
+            $skipped++;
+            continue;
+        }
+
+        mdf_mark_post_servable( $post_id );
+        $written++;
+    }
+
+    $confirmed = mdf_sync_confirmed_flag();
+
+    return [
+        'markers'   => $written,
+        'skipped'   => $skipped,
+        'confirmed' => $confirmed,
+    ];
+}
+
+/**
+ * 0.1.15 → 0.1.16 upgrade: build markers for every currently servable cached
+ * variant, set the confirmed flag from the current state, and record the
+ * counts.
+ *
+ * @return array{version:string,at:string,markers:int,skipped:int,confirmed:bool}
+ */
+function mdf_upgrade_marker_store(): array {
+    $counts = mdf_rebuild_all_markers();
+
+    $record = [
+        'version'   => MDF_VERSION,
+        'at'        => gmdate( 'c' ),
+        'markers'   => $counts['markers'],
+        'skipped'   => $counts['skipped'],
+        'confirmed' => $counts['confirmed'],
+    ];
+
+    update_option( 'mdf_marker_upgrade', $record, false );
+
+    return $record;
+}
+
+// ---------------------------------------------------------------------------
 // Sidecar (.meta.json) read / write
 // ---------------------------------------------------------------------------
 
@@ -571,6 +935,10 @@ function mdf_convert_post( int $post_id ): bool {
     // Compare against existing sidecar — no-op if unchanged.
     $existing = mdf_sidecar_read( $post_id );
     if ( $existing !== null && ( $existing['source_hash'] ?? '' ) === $hash ) {
+        // The body is unchanged, but the object may have become servable again
+        // (untrash, republish) or its permalink may have changed. Reconcile the
+        // cached-HTML marker without rewriting the variant.
+        mdf_marker_self_heal( $post_id );
         return false; // unchanged, nothing to do
     }
 
@@ -617,6 +985,14 @@ function mdf_convert_post( int $post_id ): bool {
         'converter_version' => 'league/html-to-markdown@5.1.1',
     ];
     mdf_sidecar_write( $post_id, $sidecar );
+
+    // Cached-HTML marker. Only a servable, non-empty variant of an object that
+    // is not excluded may carry one; a zero-byte result removes any old marker.
+    if ( '' === $markdown ) {
+        mdf_unmark_post( $post_id );
+    } else {
+        mdf_mark_post_servable( $post_id );
+    }
 
     mdf_manifest_record_result( $post_id, true );
     return true;
@@ -704,11 +1080,14 @@ function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
     // Skip autosaves, revisions, and non-published posts.
     if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
     if ( wp_is_post_revision( $post_id ) ) return;
-    if ( $post->post_status !== 'publish' ) return;
 
-    // Transactional pages (and other never-offerable objects) are never
-    // enqueued for rebuild.
-    if ( mdf_excluded_from_markdown( $post_id ) ) return;
+    // Objects that are not offerable — unpublished, password-protected,
+    // excluded or of a non-viewable post type — must not leave a cached-HTML
+    // marker behind.
+    if ( 'publish' !== $post->post_status || mdf_excluded_from_markdown( $post_id ) ) {
+        mdf_unmark_post( $post_id );
+        return;
+    }
 
     // Only act if markdown offering is enabled.
     if ( ! get_option( 'mdf_offer_markdown', false ) ) return;
@@ -743,7 +1122,22 @@ function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
 
     // Compare against existing sidecar.
     $existing = mdf_sidecar_read( $post_id );
+
+    // A slug or permalink change leaves the old marker pointing at a URL that
+    // no longer has a variant. Drop it (and the new path's marker, if any);
+    // the rebuild that follows writes the current one.
+    if (
+        is_array( $existing )
+        && ! empty( $existing['permalink_path'] )
+        && (string) $existing['permalink_path'] !== mdf_post_marker_path( $post_id )
+    ) {
+        mdf_unmark_post( $post_id );
+    }
+
     if ( $existing !== null && ( $existing['source_hash'] ?? '' ) === $hash ) {
+        // The body is unchanged, but the marker may need to follow a permalink
+        // change or be restored after an untrash/republish.
+        mdf_marker_self_heal( $post_id );
         return; // unchanged
     }
 
@@ -751,6 +1145,85 @@ function mdf_on_save_post( int $post_id, \WP_Post $post, bool $update ): void {
     mdf_schedule_post_rebuild( $post_id );
 }
 add_action( 'save_post', 'mdf_on_save_post', 20, 3 );
+
+/**
+ * Trash and delete: the cached-HTML marker must not outlive the variant's
+ * servability, and the adapter reads markers without WordPress.
+ */
+function mdf_on_post_unavailable( int $post_id ): void {
+    mdf_unmark_post( (int) $post_id );
+}
+add_action( 'wp_trash_post', 'mdf_on_post_unavailable' );
+add_action( 'before_delete_post', 'mdf_on_post_unavailable' );
+
+/**
+ * Unpublishing removes the marker; republishing restores it when a servable
+ * variant is still on disk (the rebuild that save_post schedules then corrects
+ * both the body and the marker).
+ *
+ * @param string        $new_status New post status.
+ * @param string        $old_status Old post status.
+ * @param \WP_Post|null $post       The post object.
+ */
+function mdf_on_post_transition( $new_status, $old_status, $post ): void {
+    $post_id = is_object( $post ) && isset( $post->ID ) ? (int) $post->ID : 0;
+
+    if ( $post_id <= 0 ) {
+        return;
+    }
+
+    if ( 'publish' === $new_status ) {
+        mdf_marker_self_heal( $post_id );
+        return;
+    }
+
+    if ( 'publish' === $old_status ) {
+        mdf_unmark_post( $post_id );
+    }
+}
+add_action( 'transition_post_status', 'mdf_on_post_transition', 10, 3 );
+
+/**
+ * A permalink-structure change rewrites every canonical path, so every marker
+ * is rebuilt from the current permalinks.
+ */
+function mdf_on_permalink_structure_changed(): void {
+    mdf_rebuild_all_markers();
+}
+add_action( 'permalink_structure_changed', 'mdf_on_permalink_structure_changed' );
+
+/**
+ * A post type that stops being publicly viewable makes every object of that
+ * type non-offerable. The registered set is cheap to observe; compare it with
+ * the last observed set and reconcile markers only when it changed.
+ */
+function mdf_maybe_reconcile_post_type_visibility(): void {
+    $viewable = [];
+
+    foreach ( array_keys( (array) get_post_types() ) as $type ) {
+        if ( is_post_type_viewable( $type ) ) {
+            $viewable[] = $type;
+        }
+    }
+
+    sort( $viewable );
+    $current = md5( implode( ',', $viewable ) );
+    $stored  = (string) get_option( 'mdf_visible_post_types', '' );
+
+    if ( $stored === $current ) {
+        return;
+    }
+
+    update_option( 'mdf_visible_post_types', $current );
+
+    // First observation on an existing site: nothing to compare against.
+    if ( '' === $stored ) {
+        return;
+    }
+
+    mdf_rebuild_all_markers();
+}
+add_action( 'init', 'mdf_maybe_reconcile_post_type_visibility', 99 );
 
 /**
  * Schedule a single-post markdown rebuild via WP-Cron.
@@ -955,6 +1428,9 @@ function mdf_third_party_no_cache(): bool {
  */
 function mdf_delete_cached_variant( int $post_id ): bool {
     $removed = false;
+
+    // The cached-HTML marker must go with the variant, wherever it was recorded.
+    mdf_unmark_post( $post_id );
 
     foreach ( [ mdf_cache_posts_dir() . '/' . $post_id . '.md', mdf_sidecar_path( $post_id ) ] as $path ) {
         if ( file_exists( $path ) && @unlink( $path ) ) {
@@ -1679,6 +2155,9 @@ function mdf_run_negotiation_self_test(): array {
         delete_option( MDF_OWNER_CONFIRMED_OPTION );
     }
 
+    // The cached-HTML confirmed flag follows the same claim as /mdf.json.
+    mdf_sync_confirmed_flag();
+
     $running = false;
 
     return $result;
@@ -1883,10 +2362,66 @@ function mdf_wpsc_mod_rewrite_mode(): ?bool {
     return $mode;
 }
 
+/**
+ * Whether cached HTML can carry X-MDF-Version on this site, and why not when
+ * it cannot.
+ *
+ * The adapter is the only thing that can add the header to a page-cache hit.
+ * It needs WP Super Cache standard mode, its own registration, and a readable
+ * marker store. Anything else means cached HTML is served without the header —
+ * a limitation to state, not an error to hide.
+ *
+ * @return array{active:bool,reason:string}
+ */
+function mdf_cached_html_header_coverage(): array {
+    if ( ! mdf_wpsc_active() ) {
+        return [
+            'active' => false,
+            'reason' => 'no WP Super Cache — another page cache or a CDN can serve cached HTML before WordPress runs',
+        ];
+    }
+
+    $mode = mdf_wpsc_mod_rewrite_mode();
+
+    if ( true === $mode ) {
+        return [
+            'active' => false,
+            'reason' => 'WP Super Cache is in Expert (mod_rewrite) mode, which serves cached files before any PHP runs',
+        ];
+    }
+
+    if ( null === $mode ) {
+        return [
+            'active' => false,
+            'reason' => 'WP Super Cache\'s mode could not be read',
+        ];
+    }
+
+    if ( ! mdf_wpsc_adapter_registered() ) {
+        return [
+            'active' => false,
+            'reason' => 'the MDF adapter is not registered with WP Super Cache',
+        ];
+    }
+
+    if ( ! mdf_marker_store_readable() ) {
+        return [
+            'active' => false,
+            'reason' => 'the marker store at ' . mdf_marker_dir() . ' is missing or not readable by the web server',
+        ];
+    }
+
+    return [ 'active' => true, 'reason' => '' ];
+}
+
 // Self-heal the registration on admin loads (e.g. after a plugin update, when
 // the activation hook does not run). wpsc_add_plugin() is a no-op when the
 // adapter is already registered.
 add_action( 'admin_init', 'mdf_maybe_register_wpsc_adapter' );
+
+// Keep the cached-HTML confirmed flag in step with the claim even when the
+// state changed outside the Settings form (for example through WP-CLI).
+add_action( 'admin_init', 'mdf_sync_confirmed_flag' );
 
 // ---------------------------------------------------------------------------
 // Backfill — full catalogue rebuild on toggle enable
@@ -2224,6 +2759,14 @@ function mdf_activate(): void {
         mdf_upgrade_normalise_file_modes();
     }
 
+    // 0.1.15 → 0.1.16: build the cached-HTML marker store from what is already
+    // cached and servable, and set the confirmed flag from the current state.
+    if ( version_compare( $installed, '0.1.16', '<' ) ) {
+        mdf_upgrade_marker_store();
+    } else {
+        mdf_sync_confirmed_flag();
+    }
+
     mdf_schedule_negotiation_self_test();
 
     // Register the WP Super Cache adapter when markdown offering is already on
@@ -2265,8 +2808,14 @@ function mdf_deactivate(): void {
     wp_clear_scheduled_hook( 'mdf_negotiation_delayed_retest' );
 
     // Remove the WP Super Cache adapter registration so a deactivated plugin
-    // has no effect on caching.
+    // has no effect on caching. The cached-HTML flag goes with it: without the
+    // adapter nothing reads it, and a stale flag must not survive to a later
+    // state.
     mdf_maybe_unregister_wpsc_adapter();
+
+    if ( file_exists( mdf_confirmed_flag_path() ) ) {
+        @unlink( mdf_confirmed_flag_path() );
+    }
 }
 
 function mdf_uninstall(): void {
@@ -2278,6 +2827,9 @@ function mdf_uninstall(): void {
 
     // Remove the generated markdown cache directory under wp-content/uploads.
     mdf_remove_dir( mdf_cache_base_dir() );
+
+    // Remove the cached-HTML marker store (content dir, not uploads).
+    mdf_remove_dir( mdf_marker_dir() );
 
     // Remove all plugin options.
     delete_option( 'mdf_db_version' );
@@ -2297,6 +2849,10 @@ function mdf_uninstall(): void {
     delete_option( 'mdf_llms_txt' );
     delete_option( 'mdf_negotiation_status' );
     delete_option( MDF_OWNER_CONFIRMED_OPTION );
+    delete_option( 'mdf_exclusion_cleanup' );
+    delete_option( 'mdf_mode_normalisation' );
+    delete_option( 'mdf_marker_upgrade' );
+    delete_option( 'mdf_visible_post_types' );
 
     // Clear scheduled events.
     wp_clear_scheduled_hook( 'mdf_purge_old_records' );
@@ -2967,6 +3523,22 @@ function mdf_render_negotiation_status_block(): void {
             </p>
         <?php endif; ?>
 
+        <?php $coverage = mdf_cached_html_header_coverage(); ?>
+        <p class="description" style="margin:4px 0 0;">
+            <strong>Cached-HTML header coverage:</strong>
+            <?php if ( $coverage['active'] ) : ?>
+                active — a cached page for a URL that has a markdown variant carries <code>X-MDF-Version: 1</code>.
+            <?php else : ?>
+                not available — <?php echo esc_html( $coverage['reason'] ); ?>.
+            <?php endif; ?>
+        </p>
+
+        <?php if ( $wpsc_active && false === $mod_rewrite && $adapter && ! mdf_marker_store_readable() ) : ?>
+            <div class="notice notice-warning inline" style="margin:8px 0 0;">
+                <p><strong>MDF Analytics:</strong> the marker store at <code><?php echo esc_html( mdf_marker_dir() ); ?></code> cannot be read, so cached pages will not carry <code>X-MDF-Version</code>. Check that <code>wp-content</code> is writable by the web server user, then re-save these settings.</p>
+            </div>
+        <?php endif; ?>
+
         <?php if ( ! $claim && mdf_get_llms_txt_option()['content'] !== '' ) : ?>
             <p class="description" style="margin:4px 0 0;">Your saved llms.txt is served verbatim, so its own "Machine-readable content" section (if it has one) is still published as you wrote it. Edit it below if that is no longer accurate.</p>
         <?php endif; ?>
@@ -3035,6 +3607,9 @@ function mdf_render_settings(): void {
             $owner_confirmed = isset( $_POST['mdf_negotiation_owner_confirmed'] ) && $_POST['mdf_negotiation_owner_confirmed'] === '1';
             update_option( MDF_OWNER_CONFIRMED_OPTION, $owner_confirmed, false );
         }
+
+        // The cached-HTML flag tracks the same claim as /mdf.json.
+        mdf_sync_confirmed_flag();
 
         echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
     }
@@ -3435,6 +4010,9 @@ function mdf_maybe_upgrade_db(): void {
 
         if ( version_compare( $installed, '0.1.16', '<' ) ) {
             mdf_upgrade_normalise_file_modes();
+            mdf_upgrade_marker_store();
+        } else {
+            mdf_sync_confirmed_flag();
         }
 
         mdf_schedule_purge();

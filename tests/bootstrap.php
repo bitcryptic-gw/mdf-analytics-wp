@@ -81,6 +81,12 @@ function mdf_test_reset(): void {
 	if ( is_dir( '/tmp/mdf-test-uploads' ) ) {		mdf_test_rmdir( '/tmp/mdf-test-uploads' );
 	}
 	mkdir( '/tmp/mdf-test-uploads', 0777, true );
+
+	// The cached-HTML marker store lives in the content directory, not uploads.
+	$marker_dir = WP_CONTENT_DIR . '/mdf-cache-markers';
+	if ( is_dir( $marker_dir ) ) {
+		mdf_test_rmdir( $marker_dir );
+	}
 }
 
 function mdf_test_rmdir( string $dir ): void {

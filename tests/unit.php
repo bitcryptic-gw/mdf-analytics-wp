@@ -284,6 +284,204 @@ if ( isset( $norm['error'] ) ) {
 }
 
 // ---------------------------------------------------------------------------
+group( 'cached-HTML markers: lifecycle' );
+// ---------------------------------------------------------------------------
+
+$mk = run_state_case( [
+	'posts'   => [ 9 => [ 'post_content' => 'Body nine', 'permalink' => 'https://example.test/about/' ] ],
+	'markers' => [
+		'convert_id'          => 9,
+		'old_path'            => '/about/',
+		'new_slug_permalink'  => 'https://example.test/about-us/',
+		'new_slug_path'       => '/about-us/',
+		'structure_permalink' => 'https://example.test/articles/about-us/',
+		'structure_path'      => '/articles/about-us/',
+	],
+] );
+if ( isset( $mk['error'] ) ) {
+	ok( false, 'marker lifecycle state_case ran', (string) $mk['error'] );
+} else {
+	$m = $mk['markers'];
+	same( true, $m['convert'], 'conversion wrote a variant' );
+	same( true, $m['marker_after_convert'], 'a servable variant gets a marker' );
+	same( '/about', $m['sidecar_after_convert']['permalink_path'], 'the sidecar records the normalised path' );
+	same( true, $m['old_gone_after_slug_change'], 'a slug change removes the old marker' );
+	same( true, $m['new_present_after_slug_change'], 'a slug change marks the new path' );
+	same( 1, $m['rebuild']['markers'], 'a permalink-structure change rebuilds the marker' );
+	same( 0, $m['rebuild']['skipped'], 'nothing servable is skipped by the rebuild' );
+	same( true, $m['old_gone_after_rebuild'], 'the rebuild drops the previous structure path' );
+	same( true, $m['new_present_after_rebuild'], 'the rebuild writes the current structure path' );
+	same( true, $m['gone_after_trash'], 'trash removes the marker' );
+	same( true, $m['back_after_republish'], 'republish restores the marker while the variant is servable' );
+	same( true, $m['gone_after_delete'], 'delete removes the marker' );
+}
+
+$mz = run_state_case( [
+	'posts'        => [ 12 => [ 'post_content' => '' ] ],
+	'markers_zero' => 12,
+] );
+if ( isset( $mz['error'] ) ) {
+	ok( false, 'zero-byte marker state_case ran', (string) $mz['error'] );
+} else {
+	same( 0, $mz['markers_zero']['md_size'], 'an empty body still writes a zero-byte variant' );
+	same( false, $mz['markers_zero']['marker'], 'a zero-byte variant gets no marker' );
+}
+
+$me = run_state_case( [
+	'woo_pages'              => $woo_pages,
+	'posts'                  => [ 10 => [ 'permalink' => 'https://example.test/cart/' ] ],
+	'markers_exclusion'      => 10,
+	'markers_exclusion_path' => '/cart/',
+] );
+if ( isset( $me['error'] ) ) {
+	ok( false, 'exclusion marker state_case ran', (string) $me['error'] );
+} else {
+	same( true, $me['markers_exclusion']['before'], 'a stale variant can be marked before it is excluded' );
+	same( false, $me['markers_exclusion']['after'], 'the exclusion cleanup removes the marker' );
+	same( false, $me['markers_exclusion']['md'], 'the exclusion cleanup removes the variant' );
+}
+
+// ---------------------------------------------------------------------------
+group( 'cached-HTML confirmed flag: follows the /mdf.json gating matrix' );
+// ---------------------------------------------------------------------------
+
+$fl = run_state_case( [ 'flag' => true ] );
+if ( isset( $fl['error'] ) ) {
+	ok( false, 'confirmed-flag state_case ran', (string) $fl['error'] );
+} else {
+	foreach ( [
+		'offering_off'  => false,
+		'working'       => true,
+		'blocked'       => false,
+		'unknown'       => false,
+		'unknown_owner' => true,
+		'blocked_owner' => false,
+	] as $state => $expected ) {
+		same( $expected, $fl['flag'][ $state ]['option'], $state . ': mdf_sync_confirmed_flag() returns ' . ( $expected ? 'confirmed' : 'withheld' ) );
+		same( $expected, $fl['flag'][ $state ]['file'], $state . ': the confirmed flag file is ' . ( $expected ? 'present' : 'absent' ) );
+	}
+}
+
+// ---------------------------------------------------------------------------
+group( 'marker key: the plugin and the adapter normalise identically' );
+// ---------------------------------------------------------------------------
+
+$agreement_inputs = [
+	'/',
+	'/about/',
+	'/about',
+	'/about/?utm=1',
+	'/about/#section',
+	'/caf%C3%A9/',
+	'/caf%c3%a9/',
+	'/a//b/',
+	'/../etc/passwd',
+	'/x%00y',
+];
+
+// The plugin also accepts a full permalink URL (the adapter only ever sees a
+// request path); the normalised form is asserted separately below.
+
+$ag = run_state_case( [ 'adapter_agreement' => $agreement_inputs ] );
+if ( isset( $ag['error'] ) ) {
+	ok( false, 'adapter agreement state_case ran', (string) $ag['error'] );
+} else {
+	foreach ( $agreement_inputs as $input ) {
+		$pair = $ag['adapter_agreement'][ $input ];
+		same( $pair['plugin'], $pair['adapter'], 'normalised form agrees for ' . $input );
+		same( $pair['plugin_key'], $pair['adapter_key'], 'sha256 key agrees for ' . $input );
+	}
+
+	same( '/', $ag['adapter_agreement']['/']['plugin'], 'the front page normalises to /' );
+	same( '/about', $ag['adapter_agreement']['/about/']['plugin'], 'a trailing slash is stripped' );
+	same( '/about', $ag['adapter_agreement']['/about/?utm=1']['plugin'], 'the query string is dropped' );
+	same( '/caf%C3%A9', $ag['adapter_agreement']['/caf%c3%a9/']['plugin'], 'percent-escape hex case is normalised' );
+	same( '/blog/post', mdf_normalise_path_for_marker( 'https://example.test/blog/post/' ), 'a permalink URL reduces to its path' );
+	same( '/a//b', $ag['adapter_agreement']['/a//b/']['plugin'], 'duplicate slashes are left alone (no false match)' );
+}
+
+// ---------------------------------------------------------------------------
+group( 'WP Super Cache adapter: cached-HTML header decision matrix' );
+// ---------------------------------------------------------------------------
+
+$adapter_base = [
+	'adapter'            => true,
+	'offer'              => true,
+	'negotiation'        => 'working',
+	'accept'             => 'text/html',
+	'adapter_confirmed'  => true,
+];
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/about', 'adapter_markers' => [ '/about/' ] ] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'flag + marker: cached HTML carries X-MDF-Version: 1' );
+same( 'CACHED-HTML', $case['body'], 'the cached body is unchanged' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/about/?utm=1', 'adapter_markers' => [ '/about/' ] ] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'flag + marker: the query string does not change the key' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/caf%c3%a9/', 'adapter_markers' => [ '/caf%C3%A9/' ] ] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'flag + marker: non-ASCII paths match across escape case' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/about' ] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'no marker: no header' );
+
+$case = run_serve_case( [ 'uri' => '/about', 'adapter_markers' => [ '/about/' ], 'adapter' => true, 'offer' => true, 'negotiation' => 'unknown', 'accept' => 'text/html' ] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'no confirmed flag: no header even with a marker' );
+
+$case = run_serve_case( array_replace( $adapter_base, [ 'uri' => '/about', 'adapter_markers' => [ '/about/' ], 'accept' => 'text/markdown' ] ) );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'a markdown request gets no adapter header (the plugin sends it)' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/about', 'adapter_markers' => [ '/about/' ], 'method' => 'POST' ] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'POST gets no header' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/about', 'adapter_markers' => [ '/about/' ], 'method' => 'HEAD' ] );
+same( '1', header_value( $case['headers'], 'X-MDF-Version' ), 'HEAD gets the header too' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/mdf.json', 'adapter_markers' => [ '/mdf.json' ] ] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'the discovery documents never get the adapter header' );
+
+$case = run_serve_case( $adapter_base + [ 'uri' => '/' . str_repeat( 'a', 2048 ), 'adapter_markers' => [ '/' . str_repeat( 'a', 2048 ) ] ] );
+same( '', header_value( $case['headers'], 'X-MDF-Version' ), 'a REQUEST_URI over 2048 bytes gets no header' );
+
+foreach ( [
+	'path traversal'   => '/%2e%2e/%2e%2e/etc/passwd',
+	'double slash'     => '//about',
+	'encoded NUL'      => '/about%00',
+	'raw NUL'          => "/about\0",
+] as $label => $uri ) {
+	$case = run_serve_case( $adapter_base + [ 'uri' => $uri, 'adapter_markers' => [ '/about' ] ] );
+	same( '', header_value( $case['headers'], 'X-MDF-Version' ), $label . ': no header, hash lookup only' );
+}
+
+$case = run_serve_case( $adapter_base + [
+	'uri'                => '/about',
+	'adapter_markers'    => [ '/about/' ],
+	'also_plugin_header' => true,
+	'queried_object_id'  => 5,
+	'posts'              => [ 5 => [ 'permalink' => 'https://example.test/about/' ] ],
+	'md'                 => [ 5 => 40 ],
+] );
+same( 1, header_count( $case['headers'], 'X-MDF-Version' ), 'a cache-miss render sends X-MDF-Version exactly once (adapter + plugin)' );
+
+// ---------------------------------------------------------------------------
+group( 'cached-HTML marker store: 0.1.15 -> 0.1.16 upgrade' );
+// ---------------------------------------------------------------------------
+
+$mu = run_state_case( [
+	'posts'          => [ 21 => [ 'permalink' => 'https://example.test/product/thing/' ], 22 => [ 'permalink' => 'https://example.test/empty/' ] ],
+	'marker_upgrade' => [ 21 => 90, 22 => 0 ],
+] );
+if ( isset( $mu['error'] ) ) {
+	ok( false, 'marker upgrade state_case ran', (string) $mu['error'] );
+} else {
+	same( 1, $mu['marker_upgrade']['record']['markers'], 'the upgrade marks the one servable variant' );
+	same( 1, $mu['marker_upgrade']['record']['skipped'], 'the upgrade skips the zero-byte variant' );
+	same( false, $mu['marker_upgrade']['record']['confirmed'], 'the upgrade withholds the flag while offering is off' );
+	same( $mu['marker_upgrade']['record'], $mu['marker_upgrade']['option'], 'the upgrade records its counts in an option' );
+	same( false, $mu['marker_upgrade']['flag'], 'no confirmed flag file is left behind' );
+}
+
+// ---------------------------------------------------------------------------
 group( 'self-test: negative probes on transactional URLs' );
 // ---------------------------------------------------------------------------
 
@@ -637,6 +835,7 @@ if ( isset( $admin['error'] ) ) {
 	ok( false !== strpos( $html, 'slepner.com.au' ), 'admin output links Slepner' );
 	ok( false !== strpos( $html, 'github.com/bitcryptic-gw/mdf-analytics-wp' ), 'admin output links the plugin README' );
 	ok( false !== strpos( $html, 'Capability document' ), 'settings states the /mdf.json state' );
+	ok( false !== strpos( $html, 'Cached-HTML header coverage' ), 'settings states whether cached HTML carries X-MDF-Version' );
 	ok( false !== strpos( $html, 'not earnings' ), 'dashboard says the cards are estimates' );
 }
 
