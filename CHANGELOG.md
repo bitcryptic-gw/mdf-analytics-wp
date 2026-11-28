@@ -5,12 +5,66 @@ All notable changes to MDF Analytics will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Note:** there is no v0.1.5 — the version number was skipped and never
-> tagged. The gap between 0.1.4 and 0.1.6 is deliberate, not a missing entry.
+> **Note:** the `v0.1.5` tag exists, but it is not a 0.1.5 release. It points
+> at `f8a8f74`, the follow-up commit that corrected the `MDF_VERSION` constant
+> and README to match 0.1.4; the plugin inside it declares 0.1.4. No 0.1.5
+> build was ever published, which is why this changelog goes from 0.1.4 to
+> 0.1.6 and the 0.1.6 compare link starts at `v0.1.4`.
 
 ---
 
 ## [Unreleased]
+
+## [0.1.16] - 2026-11-28
+
+### Added
+- **`X-MDF-Version: 1` on cached HTML (WP Super Cache standard mode).** A
+  page-cache hit is answered without loading WordPress, so the plugin's own
+  header code could not run there. The plugin now keeps a marker store in
+  `wp-content/mdf-cache-markers/`: one empty, hash-named marker per URL that
+  has a servable markdown variant, plus one `confirmed` flag that exists only
+  while the claim is confirmed (the same gate as `/mdf.json`). The bundled
+  adapter makes two `stat()` calls during WP Super Cache's phase 1 and adds
+  the header to a GET/HEAD request that is not asking for markdown when both
+  are present. It reads nothing, uses no WordPress API and never touches the
+  database. Expert (mod_rewrite) mode, other page caches and CDNs still serve
+  cached HTML without the header; that is stated as a limitation, not fixed.
+- Settings states whether cached-HTML header coverage is active, and why not
+  when it is not (no WP Super Cache, Expert mode, adapter unregistered, or an
+  unreadable marker store).
+- Tests: marker lifecycle (write, slug change, permalink-structure rebuild,
+  exclusion, zero-byte, trash, republish, delete), the confirmed-flag matrix,
+  plugin/adapter normalisation agreement, and the adapter decision matrix
+  (flag/marker combinations, markdown requests, POST, oversized URI, path
+  traversal, `//`, encoded and raw NUL, discovery documents).
+
+### Fixed
+- **Explicit file modes.** Every file the plugin writes — `.md`, `.meta.json`,
+  `manifest.json`, lock and temp files, markers — is `chmod 0644` after it is
+  written, and every directory it creates is `0755`, instead of inheriting the
+  caller's umask. The 0.1.15 Stage 3 backfill, run through a CLI with umask
+  000, had written 57 files at mode 666. The long-standing `0775` on the cache
+  directories was a 0.1.6 ownership workaround, not a design decision; it is
+  replaced. Lazy directory creation now goes through the same helper as the
+  activation hook, so a first conversion cannot create umask-derived modes.
+- **Upgrade normalisation (0.1.15 → 0.1.16).** Activation and the admin-load
+  upgrade path normalise the existing cache tree to files 0644 and
+  directories 0755 without changing ownership, and record the counts in
+  `mdf_mode_normalisation`, as the 0.1.14 exclusion cleanup did.
+- **Marker maintenance.** A marker is removed when a variant stops being
+  servable (zero-byte result, exclusion, unpublish, trash, delete, password,
+  non-viewable post type), moved on a slug or permalink change, and rebuilt on
+  `permalink_structure_changed` and on a post-type visibility change.
+  Uninstall removes the marker store; plain query-string permalinks get no
+  marker at all, because the path alone cannot identify the object.
+
+### Notes
+- The header is withheld, never guessed. A missing marker, an absent flag, an
+  unreadable store, an oversized request URI or an unusual path costs a header;
+  none of them can add one to a URL that has no servable variant.
+- `X-MDF-Version` is sent exactly once on a cache-miss render, where both the
+  adapter and the plugin's own code would send it: `header( ..., true )`
+  replaces rather than appends.
 
 ## [0.1.15] - 2026-11-23
 
@@ -448,7 +502,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 2 callout CTA in dashboard footer.
 - No IP addresses stored. No external HTTP requests. No dependencies beyond WordPress core.
 
-[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/bitcryptic-gw/mdf-analytics-wp/compare/v0.1.12...v0.1.13

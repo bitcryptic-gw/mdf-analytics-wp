@@ -97,7 +97,7 @@ Configure the currency used for earnings estimates (sats via Lightning, or USDC 
 
 This is also where you enable **"Offer markdown to agents"** — the toggle that turns on markdown serving for requests sending `Accept: text/markdown`. When enabled, a coverage status line below the toggle reports backfill progress while it runs, and cached-vs-published counts once it completes.
 
-Below that, a **negotiation status** tells you whether markdown actually reaches clients, and whether the machine-readable claim in the bundled `/llms.txt` is being **published** or **withheld** — see [Negotiation self-test](#negotiation-self-test).
+Below that, a **negotiation status** tells you whether markdown actually reaches clients, and whether the machine-readable claim in the bundled `/llms.txt` is being **published** or **withheld** — see [Negotiation self-test](#negotiation-self-test). The same block also states whether cached HTML can carry `X-MDF-Version` on this site, and why not when it cannot — see [Cached HTML and X-MDF-Version](#cached-html-and-x-mdf-version).
 
 The same page also has an **llms.txt editor** — see [llms.txt serving](#llmstxt-serving).
 
@@ -170,7 +170,7 @@ Like `/llms.txt`, the response is `GET`/`HEAD` only, carries `X-Content-Type-Opt
 
 ## Markdown serving
 
-The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header and `X-MDF-Version: 1`; all other requests receive HTML as normal, with no `Vary` header added. The HTML at a URL that does have a markdown variant carries `X-MDF-Version: 1` too, as MDF 0.3.1 requires for both representations.
+The plugin pre-builds and caches a CommonMark version of each post and page. When "Offer markdown to agents" is enabled and a request sends `Accept: text/markdown`, the cached markdown is served at the same URL with a `Vary: Accept` header and `X-MDF-Version: 1`; all other requests receive HTML as normal, with no `Vary` header added. The HTML at a URL that does have a markdown variant carries `X-MDF-Version: 1` too, as MDF 0.3.1 requires for both representations — including when WP Super Cache standard mode answers it from the page cache. See [Cached HTML and X-MDF-Version](#cached-html-and-x-mdf-version).
 
 Conversion is handled by the vendored `league/html-to-markdown` library. Responses support conditional GET (`If-Modified-Since`) and HEAD, and are marked publicly cacheable for an hour.
 
@@ -194,7 +194,7 @@ On upgrade from 0.1.13 the activation hook deletes any `.md` file already cached
 ### Known limitations
 
 - **Escaped characters in the raw markdown.** Conversion writes a literal ampersand as `&amp;`, and `<` / `>` as `&lt;` / `&gt;`. That is correct markdown — it renders identically in a browser and avoids an unescaped `&` being read as the start of an entity — but an agent reading the raw text sees the escape where a human sees `&`. Other HTML entities such as `&eacute;` or `&hellip;` are decoded to the character they represent.
-- **Page caches.** A page cache that serves stored HTML before WordPress runs can answer a markdown request with HTML. WP Super Cache in its standard mode is handled by the bundled adapter; other caches, CDNs and WP Super Cache's Expert mode are not. See [Page caches](#page-caches), and use the [negotiation self-test](#negotiation-self-test) to see whether markdown is actually reaching agents on your setup.
+- **Page caches.** A page cache that serves stored HTML before WordPress runs can answer a markdown request with HTML. WP Super Cache in its standard mode is handled by the bundled adapter, which also adds `X-MDF-Version` to that cached HTML for URLs that have a markdown variant. WP Super Cache's Expert mode, other page caches and CDNs serve cached HTML without the header, and the plugin cannot add it there. See [Page caches](#page-caches), and use the [negotiation self-test](#negotiation-self-test) to see whether markdown is actually reaching agents on your setup.
 
 ---
 
@@ -210,9 +210,26 @@ MDF Analytics ships a small adapter, `mdf-supercache-adapter.php`, **inside its 
 
 The adapter hooks WP Super Cache's `cache_init` action and, when the request is a GET/HEAD carrying `Accept: text/markdown` (case-insensitive), sets WP Super Cache's `$cache_enabled = false` and defines `DONOTCACHEPAGE`. WP Super Cache's phase 1 checks `$cache_enabled` immediately after `cache_init` and returns before serving anything, and `wp_cache_postload()` returns before the output-buffer callback is installed — so a markdown request **neither reads nor writes** the page cache. That is the point. An earlier design gave markdown requests their own cache key via a marker; a marked request that fell through to normal HTML rendering (no cached `.md` yet) was cached under the markdown key and then served to every later markdown request. A total bypass cannot do that, needs no marker and no separate key, and is independent of encoding. Requests that are not markdown are touched in no way, so browser behaviour is bit-for-bit identical; missing, non-string and oversized `Accept` values are treated as "not markdown"; GET and HEAD only. Marker-keyed entries left behind by earlier versions are never read again and expire on their own — no cleanup is required.
 
+### Cached HTML and `X-MDF-Version`
+
+MDF 0.3.1 requires `X-MDF-Version` on the HTML served at a URL where markdown is available. A page-cache hit is answered without loading WordPress, so the plugin's own header code cannot run on that path.
+
+In WP Super Cache's standard mode the bundled adapter covers it. The plugin keeps a small marker store in `wp-content/mdf-cache-markers/`:
+
+- one empty marker file for every URL that has a servable markdown variant, named by the SHA-256 of the normalised request path, and
+- one `confirmed` flag that exists only while the site's claim is confirmed — the same gate as `/mdf.json`.
+
+During WP Super Cache's phase 1 the adapter makes two `stat()` calls, reads nothing, and adds `X-MDF-Version: 1` to a GET/HEAD request that is not asking for markdown only when both files are present. The marker store is deliberately outside both the uploads directory (which can be relocated) and WP Super Cache's cache directory (which "Delete cache" wipes).
+
+Markers follow the variant's lifecycle: a marker is written when a conversion produces a non-empty variant, and removed when the variant stops being servable — a zero-byte result, an exclusion, unpublish, trash, delete, a password being added, a post type becoming non-viewable, or a slug or permalink change. They are rebuilt on a permalink-structure change and on the 0.1.15 → 0.1.16 upgrade.
+
+If the marker store is not readable, or the site is not in WP Super Cache standard mode with the adapter registered, cached HTML simply carries no header — a withheld header, never a wrong one. The Settings page states which case applies and why.
+
+Plain (query-string) permalinks put the object's identity in the query string, which the marker key does not carry, so those URLs get no marker and their cached HTML carries no header. That is deliberate: the alternative would let every post claim the front page's path.
+
 ### Expert (mod_rewrite) mode
 
-If WP Super Cache is configured in Expert mode, Apache serves the cached HTML file directly from `.htaccess` before any PHP runs, so no adapter can fix it. The plugin detects this and says so in the Settings status rather than claiming a fix. To handle markdown requests yourself, add a condition that skips the supercache rewrite when the `Accept` header asks for markdown — for example, add the following to **each** `RewriteCond` block that serves a `supercache` file, before the existing `RewriteRule`:
+If WP Super Cache is configured in Expert mode, Apache serves the cached HTML file directly from `.htaccess` before any PHP runs, so no adapter can fix it. The plugin detects this and says so in the Settings status rather than claiming a fix. Expert mode also means cached HTML carries no `X-MDF-Version`, for the same reason. To handle markdown requests yourself, add a condition that skips the supercache rewrite when the `Accept` header asks for markdown — for example, add the following to **each** `RewriteCond` block that serves a `supercache` file, before the existing `RewriteRule`:
 
 ```apache
 RewriteCond %{HTTP:Accept} !text/markdown [NC]
@@ -277,13 +294,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.1.16 | 2026-11-28 | Added: `X-MDF-Version: 1` on cached HTML in WP Super Cache standard mode, via per-URL path markers read by the bundled adapter. Settings states whether cached-HTML header coverage is active, and why not when it is not. Fixed: every plugin-written file is 0644 and every directory 0755, independent of the caller's umask, with an upgrade that normalises the existing cache tree. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.15 | 2026-11-23 | Added: a free-only `/mdf.json` capability document (MDF 0.3.1), published only when markdown offering is on and negotiation is confirmed, 404 otherwise, with static-file shadow detection. Added: `X-MDF-Version: 1` on markdown responses and on the HTML at URLs that have a variant. Fixed: a delayed re-test after activation when the WP Super Cache adapter was just registered, so a stale compiled config cannot withhold the claim for a day. Changed: admin copy now says free markdown today and paid markdown over x402 planned; plugin header declares WordPress 6.0 / PHP 8.0; attribution is BitCryptic™ and Slepner. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.14 | 2026-10-25 | Added: WooCommerce cart, checkout (with `order-pay`/`order-received`), account (with every account endpoint) and shop pages are never offered as markdown, with upgrade cleanup of any variant already cached. Added: self-test negative probes on those URLs in both encodings — any markdown answer reports `blocked`. Added: llms.txt "Session-only pages" section on Woo sites. Fixed: non-singular views (archives) could be answered with an unrelated post's markdown; zero-byte variants are no longer served. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.13 | 2026-09-20 | Fixed: the WP Super Cache adapter is now a total bypass — on a markdown request it sets `$cache_enabled = false` and defines `DONOTCACHEPAGE`, so the request neither reads nor writes the page cache. The previous marker-keyed design could cache an HTML fallback under the markdown key and then serve it to later markdown requests. Fixed: self-test excludes query-string permalinks and probes both gzip and `identity` encodings. See [CHANGELOG.md](CHANGELOG.md). |
 | 0.1.12 | 2026-09-20 | Fixed: the machine-readable `/llms.txt` claim is now published only when offering is enabled **and** negotiation is confirmed (self-test or owner override) — previously it was suppressed only on `blocked`, so offer-off sites published a false claim. Fixed: self-test URL selection now skips non-public post types, empty/missing `.md`, and unreachable URLs, probes up to three, and reports a markdown/HTML split as `blocked`. Added: owner confirmation override with a one-line per-state reason. See [CHANGELOG.md](CHANGELOG.md). |
-| 0.1.11 | 2026-09-20 | Added: negotiation self-test (working/blocked/unknown) stored in `mdf_negotiation_status`; honest `/llms.txt` that drops the markdown-negotiation claim when blocked while never altering saved custom content; bundled WP Super Cache adapter registered by path via `wpsc_plugins`, fixing the reverse race in standard mode with an honest Expert (mod_rewrite) caveat. See [CHANGELOG.md](CHANGELOG.md). |
 
-Older releases (0.1.0 through 0.1.10) are listed in [CHANGELOG.md](CHANGELOG.md). There is no v0.1.5 — the version was skipped.
+Older releases (0.1.0 through 0.1.11) are listed in [CHANGELOG.md](CHANGELOG.md).
+
+The `v0.1.5` tag exists, but it is not a 0.1.5 release: it points at `f8a8f74`, the follow-up commit that corrected the `MDF_VERSION` constant and README to match 0.1.4, and the plugin inside it declares 0.1.4. No 0.1.5 build was ever published, which is why the changelog goes from 0.1.4 to 0.1.6.
 
 ---
 
