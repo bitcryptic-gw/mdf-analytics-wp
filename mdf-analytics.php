@@ -466,9 +466,21 @@ function mdf_mark_post_servable( int $post_id ): void {
         return;
     }
 
+    $sidecar = mdf_sidecar_read( $post_id );
+
+    // If the object's path changed, the marker recorded under the old path is
+    // now a claim about a URL that no longer has this variant. Remove it before
+    // writing the new one.
+    if (
+        is_array( $sidecar )
+        && ! empty( $sidecar['permalink_path'] )
+        && (string) $sidecar['permalink_path'] !== $path
+    ) {
+        mdf_delete_path_marker( (string) $sidecar['permalink_path'] );
+    }
+
     mdf_write_path_marker( $path );
 
-    $sidecar = mdf_sidecar_read( $post_id );
     if ( is_array( $sidecar ) ) {
         $sidecar['permalink_path'] = $path;
         $sidecar['marker']         = mdf_marker_key( $path ) . '.path';
