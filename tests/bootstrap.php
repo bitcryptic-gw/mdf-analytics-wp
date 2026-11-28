@@ -56,6 +56,7 @@ $GLOBALS['mdf_test'] = [
 	'hidden_types' => [ 'hidden' ],
 	'scheduled' => [],
 	'plugins'   => [],
+	'current_post' => null,
 ];
 
 function mdf_test_reset(): void {
@@ -227,6 +228,42 @@ class WP_Post {
 	public $post_title        = '';
 	public $post_content      = '';
 	public $post_modified_gmt = '2026-10-01 00:00:00';
+}
+
+/**
+ * Just enough of WP_Query for mdf_convert_post()'s singular-context swap.
+ */
+class WP_Query {
+	private $ids = [];
+	private $i   = 0;
+
+	public function __construct( $args = [] ) {
+		if ( isset( $args['p'] ) && get_post( (int) $args['p'] ) ) {
+			$this->ids = [ (int) $args['p'] ];
+		}
+	}
+
+	public function have_posts() {
+		return $this->i < count( $this->ids );
+	}
+
+	public function the_post() {
+		$GLOBALS['mdf_test']['current_post'] = get_post( $this->ids[ $this->i ] );
+		$this->i++;
+	}
+}
+
+function get_the_ID() {
+	return isset( $GLOBALS['mdf_test']['current_post'] ) ? (int) $GLOBALS['mdf_test']['current_post']->ID : 0;
+}
+
+function get_the_content( $more = null, $strip = false, $post = null ) {
+	$resolved = $post ?? ( $GLOBALS['mdf_test']['current_post'] ?? null );
+	return $resolved instanceof WP_Post ? (string) $resolved->post_content : '';
+}
+
+function wp_reset_postdata() {
+	$GLOBALS['mdf_test']['current_post'] = null;
 }
 
 class WP_Error {	private $code;

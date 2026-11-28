@@ -243,6 +243,47 @@ if ( isset( $up['error'] ) ) {
 
 
 // ---------------------------------------------------------------------------
+group( 'file modes: explicit 0644 / 0755, independent of the caller umask' );
+// ---------------------------------------------------------------------------
+
+$modes = run_state_case( [
+	'posts' => [ 9 => [ 'post_content' => 'Body nine' ] ],
+	'modes' => [ 'convert_id' => 9 ],
+] );
+if ( isset( $modes['error'] ) ) {
+	ok( false, 'file-mode state_case ran', (string) $modes['error'] );
+} else {
+	ok( true === $modes['modes']['converted'], 'a conversion actually wrote the files under umask(0)' );
+	same( 0755, $modes['modes']['modes']['base'], 'cache base directory is 0755' );
+	same( 0755, $modes['modes']['modes']['posts'], 'posts/ directory is 0755' );
+	same( 0644, $modes['modes']['modes']['md'], '.md file is 0644 under umask(0)' );
+	same( 0644, $modes['modes']['modes']['sidecar'], '.meta.json is 0644 under umask(0)' );
+	same( 0644, $modes['modes']['modes']['manifest'], 'manifest.json is 0644 under umask(0)' );
+}
+
+$norm = run_state_case( [
+	'normalise' => [
+		'posts'         => [],
+		'stray.md'      => 'x',
+		'manifest.json' => '{}',
+	],
+] );
+if ( isset( $norm['error'] ) ) {
+	ok( false, 'normalisation state_case ran', (string) $norm['error'] );
+} else {
+	$n = $norm['normalise'];
+	same( 0777, $n['seeded']['posts'], 'seeded directory starts at 0777' );
+	same( 0666, $n['seeded']['stray.md'], 'seeded file starts at 0666' );
+	same( 0755, $n['after']['base'], 'upgrade normalises the base directory to 0755' );
+	same( 0755, $n['after']['posts'], 'upgrade normalises subdirectories to 0755' );
+	same( 0644, $n['after']['stray.md'], 'upgrade normalises files to 0644' );
+	same( 0644, $n['after']['manifest.json'], 'upgrade normalises manifest.json to 0644' );
+	same( 2, $n['record']['files'], 'upgrade records the normalised file count' );
+	same( 2, $n['record']['dirs'], 'upgrade records the normalised directory count (base + posts)' );
+	same( $n['record'], $n['option'], 'the counts are recorded in an option, as 0.1.14 did' );
+}
+
+// ---------------------------------------------------------------------------
 group( 'self-test: negative probes on transactional URLs' );
 // ---------------------------------------------------------------------------
 

@@ -133,24 +133,132 @@ function mdf_cache_posts_dir(): string {
 }
 
 /**
+ * Set an explicit file mode, independent of the caller's umask.
+ *
+ * Plugin writes must not inherit the mode of whatever process created them.
+ * A WP-CLI call in a container with `umask 000` produced 0666 files in the
+ * 0.1.15 rollout, which trips the fleet ownership gate's world-writable check
+ * even though the owner is correct. Every file the plugin writes is 0644.
+ */
+function mdf_chmod_file( string $path ): void {
+    if ( file_exists( $path ) ) {
+        @chmod( $path, 0644 );
+    }
+}
+
+/**
+ * Set an explicit directory mode, independent of the caller's umask.
+ */
+function mdf_chmod_dir( string $path ): void {
+    if ( is_dir( $path ) ) {
+        @chmod( $path, 0755 );
+    }
+}
+
+/**
+ * Normalise an existing tree to files 0644 and directories 0755.
+ *
+ * Ownership is never changed — only the mode bits. Symlinked directories are
+ * left alone, so a relocated uploads tree cannot pull the walk out of the
+ * cache directory.
+ *
+ * @return array{files:int,dirs:int}
+ */
+function mdf_normalise_tree_modes( string $dir ): array {
+    $counts = [ 'files' => 0, 'dirs' => 0 ];
+
+    if ( ! is_dir( $dir ) ) {
+        return $counts;
+    }
+
+    $entries = @scandir( $dir );
+    if ( ! is_array( $entries ) ) {
+        return $counts;
+    }
+
+    foreach ( $entries as $entry ) {
+        if ( '.' === $entry || '..' === $entry ) {
+            continue;
+        }
+
+        $path = $dir . '/' . $entry;
+
+        if ( is_dir( $path ) && ! is_link( $path ) ) {
+            @chmod( $path, 0755 );
+            $counts['dirs']++;
+            $sub             = mdf_normalise_tree_modes( $path );
+            $counts['files'] += $sub['files'];
+            $counts['dirs']  += $sub['dirs'];
+            continue;
+        }
+
+        @chmod( $path, 0644 );
+        $counts['files']++;
+    }
+
+    return $counts;
+}
+
+/**
+ * 0.1.15 → 0.1.16 upgrade: normalise the existing cache tree's modes.
+ *
+ * Files written by earlier versions inherited the caller's umask (the 0.1.15
+ * Stage 3 backfill produced 57 files at mode 666). Counts are recorded the same
+ * way the 0.1.14 exclusion cleanup records its work.
+ *
+ * @return array{version:string,at:string,files:int,dirs:int}
+ */
+function mdf_upgrade_normalise_file_modes(): array {
+    $base   = mdf_cache_base_dir();
+    $counts = mdf_normalise_tree_modes( $base );
+
+    if ( is_dir( $base ) ) {
+        @chmod( $base, 0755 );
+        $counts['dirs']++;
+    }
+
+    $record = [
+        'version' => MDF_VERSION,
+        'at'      => gmdate( 'c' ),
+        'files'   => $counts['files'],
+        'dirs'    => $counts['dirs'],
+    ];
+
+    update_option( 'mdf_mode_normalisation', $record, false );
+
+    return $record;
+}
+
+/**
  * Create the cache directory structure with an empty index.html to block
  * directory listing.
+ *
+ * Modes are explicit: directories 0755, files 0644. The historical 0775 was
+ * added in 0.1.6 as a best-effort mitigation for cache directories created by
+ * a different user during a Docker build (group-writable so the serving user
+ * in the same group could still write). That was a workaround for ownership,
+ * not a design decision, and it is not needed now that writes are explicit;
+ * every fleet container runs the plugin as www-data with umask 022.
  */
 function mdf_create_cache_dirs(): void {
     $base  = mdf_cache_base_dir();
     $posts = mdf_cache_posts_dir();
 
+    if ( ! is_dir( $base ) ) {
+        wp_mkdir_p( $base );
+    }
     if ( ! is_dir( $posts ) ) {
         wp_mkdir_p( $posts );
     }
 
-    @chmod( $base, 0775 );
-    @chmod( $posts, 0775 );
+    @chmod( $base, 0755 );
+    @chmod( $posts, 0755 );
 
     $index = $base . '/index.html';
     if ( ! file_exists( $index ) ) {
         file_put_contents( $index, '' );
     }
+    mdf_chmod_file( $index );
 }
 
 /**
@@ -183,20 +291,23 @@ function mdf_sidecar_read( int $post_id ): ?array {
 
 function mdf_sidecar_write( int $post_id, array $data ): bool {
     $path = mdf_sidecar_path( $post_id );
-    $dir  = mdf_cache_posts_dir();
-
-    if ( ! is_dir( $dir ) ) {
-        wp_mkdir_p( $dir );
-    }
+    mdf_create_cache_dirs();
 
     $tmp = $path . '.' . getmypid() . '.tmp';
     $json = wp_json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
     if ( $json === false || file_put_contents( $tmp, $json . "\n" ) === false ) {
         return false;
     }
+    mdf_chmod_file( $tmp );
 
     // Atomic rename — old file stays servable until the new one is in place.
-    return rename( $tmp, $path );
+    if ( ! rename( $tmp, $path ) ) {
+        return false;
+    }
+
+    mdf_chmod_file( $path );
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,18 +348,21 @@ function mdf_manifest_read(): array {
 
 function mdf_manifest_write( array $manifest ): bool {
     $path = mdf_manifest_path();
-    $dir  = mdf_cache_base_dir();
-
-    if ( ! is_dir( $dir ) ) {
-        wp_mkdir_p( $dir );
-    }
+    mdf_create_cache_dirs();
 
     $tmp  = $path . '.' . getmypid() . '.tmp';
     $json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
     if ( $json === false || file_put_contents( $tmp, $json . "\n" ) === false ) {
         return false;
     }
-    return rename( $tmp, $path );
+    mdf_chmod_file( $tmp );
+    if ( ! rename( $tmp, $path ) ) {
+        return false;
+    }
+
+    mdf_chmod_file( $path );
+
+    return true;
 }
 
 /**
@@ -264,11 +378,7 @@ function mdf_manifest_write( array $manifest ): bool {
  */
 function mdf_manifest_lock_and_read(): array {
     $path = mdf_manifest_path();
-    $dir  = dirname( $path );
-
-    if ( ! is_dir( $dir ) ) {
-        wp_mkdir_p( $dir );
-    }
+    mdf_create_cache_dirs();
 
     $handle = fopen( $path, 'c+' );
     if ( $handle === false ) {
@@ -279,6 +389,10 @@ function mdf_manifest_lock_and_read(): array {
             'failed_ids'    => [],
         ] ];
     }
+
+    // The lock file is the manifest itself; fopen() created it under the
+    // caller's umask when it did not exist yet.
+    mdf_chmod_file( $path );
 
     if ( ! flock( $handle, LOCK_EX ) ) {
         fclose( $handle );
@@ -321,16 +435,21 @@ function mdf_manifest_lock_and_read(): array {
  */
 function mdf_manifest_write_and_unlock( $handle, array $manifest ): bool {
     $path = mdf_manifest_path();
-    $dir  = dirname( $path );
-
-    if ( ! is_dir( $dir ) ) {
-        wp_mkdir_p( $dir );
-    }
+    mdf_create_cache_dirs();
 
     $tmp  = $path . '.' . getmypid() . '.tmp';
     $json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT );
 
-    $ok = ( $json !== false && file_put_contents( $tmp, $json . "\n" ) !== false && rename( $tmp, $path ) );
+    $ok = ( $json !== false && file_put_contents( $tmp, $json . "\n" ) !== false );
+
+    if ( $ok ) {
+        mdf_chmod_file( $tmp );
+        $ok = rename( $tmp, $path );
+    }
+
+    if ( $ok ) {
+        mdf_chmod_file( $path );
+    }
 
     if ( $handle !== null ) {
         // After rename the handle points to the old (unlinked) inode.
@@ -465,10 +584,8 @@ function mdf_convert_post( int $post_id ): bool {
         return false;
     }
 
+    mdf_create_cache_dirs();
     $md_dir = mdf_cache_posts_dir();
-    if ( ! is_dir( $md_dir ) ) {
-        wp_mkdir_p( $md_dir );
-    }
     if ( ! is_writable( $md_dir ) ) {
         if ( ! get_option( 'mdf_cache_writable_error' ) ) {
             update_option( 'mdf_cache_writable_error', gmdate( 'c' ) . ' — Cache directory not writable by web server. Manual permissions fix required.' );
@@ -484,10 +601,12 @@ function mdf_convert_post( int $post_id ): bool {
         mdf_manifest_record_result( $post_id, false );
         return false;
     }
+    mdf_chmod_file( $md_tmp );
     if ( ! rename( $md_tmp, $md_path ) ) {
         mdf_manifest_record_result( $post_id, false );
         return false;
     }
+    mdf_chmod_file( $md_path );
 
     // Write sidecar.
     $sidecar = [
@@ -530,10 +649,8 @@ function mdf_cron_backfill_batch(): void {
         return;
     }
 
+    mdf_create_cache_dirs();
     $posts_dir = mdf_cache_posts_dir();
-    if ( ! is_dir( $posts_dir ) ) {
-        wp_mkdir_p( $posts_dir );
-    }
     if ( ! is_writable( $posts_dir ) ) {
         if ( ! get_option( 'mdf_cache_writable_error' ) ) {
             update_option( 'mdf_cache_writable_error', gmdate( 'c' ) . ' — Cache directory not writable by web server. Manual permissions fix required.' );
@@ -2101,6 +2218,12 @@ function mdf_activate(): void {
         mdf_upgrade_exclusion_cleanup();
     }
 
+    // 0.1.15 → 0.1.16: explicit modes for everything already on disk. Files
+    // written by earlier versions inherited the caller's umask.
+    if ( version_compare( $installed, '0.1.16', '<' ) ) {
+        mdf_upgrade_normalise_file_modes();
+    }
+
     mdf_schedule_negotiation_self_test();
 
     // Register the WP Super Cache adapter when markdown offering is already on
@@ -3308,6 +3431,10 @@ function mdf_maybe_upgrade_db(): void {
 
         if ( version_compare( $installed, '0.1.14', '<' ) ) {
             mdf_upgrade_exclusion_cleanup();
+        }
+
+        if ( version_compare( $installed, '0.1.16', '<' ) ) {
+            mdf_upgrade_normalise_file_modes();
         }
 
         mdf_schedule_purge();

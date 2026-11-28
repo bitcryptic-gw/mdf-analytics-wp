@@ -242,4 +242,78 @@ if ( ! empty( $spec['activate'] ) ) {
 	];
 }
 
+if ( ! empty( $spec['modes'] ) ) {
+	// Worst case: no inherited restriction at all. Every mode the plugin
+	// writes must still come out 0644 / 0755.
+	$id = (int) ( $spec['modes']['convert_id'] ?? 0 );
+
+	$previous_umask = umask( 0 );
+	$converted      = $id > 0 ? mdf_convert_post( $id ) : false;
+	umask( $previous_umask );
+
+	$paths = [
+		'base'     => mdf_cache_base_dir(),
+		'posts'    => mdf_cache_posts_dir(),
+		'index'    => mdf_cache_base_dir() . '/index.html',
+		'manifest' => mdf_manifest_path(),
+	];
+	if ( $id > 0 ) {
+		$paths['md']      = mdf_cache_posts_dir() . '/' . $id . '.md';
+		$paths['sidecar'] = mdf_sidecar_path( $id );
+	}
+
+	$modes = [];
+	foreach ( $paths as $name => $path ) {
+		clearstatcache( true, $path );
+		if ( ! file_exists( $path ) ) {
+			$modes[ $name ] = null;
+			continue;
+		}
+		$modes[ $name ] = fileperms( $path ) & 0777;
+	}
+
+	$out['modes'] = [
+		'converted' => $converted,
+		'modes'     => $modes,
+	];
+}
+
+if ( ! empty( $spec['normalise'] ) ) {
+	$base  = mdf_cache_base_dir();
+	$posts = mdf_cache_posts_dir();
+	wp_mkdir_p( $posts );
+	@chmod( $base, 0777 );
+	@chmod( $posts, 0777 );
+
+	$seeded = [];
+	foreach ( (array) $spec['normalise'] as $name => $value ) {
+		$path = $base . '/' . $name;
+		if ( is_array( $value ) ) {
+			// directory
+			wp_mkdir_p( $path );
+			@chmod( $path, 0777 );
+			$seeded[ $name ] = 0777;
+			continue;
+		}
+		file_put_contents( $path, (string) $value );
+		@chmod( $path, 0666 );
+		$seeded[ $name ] = 0666;
+	}
+
+	$record = mdf_upgrade_normalise_file_modes();
+
+	clearstatcache();
+	$after = [ 'base' => fileperms( $base ) & 0777 ];
+	foreach ( array_keys( $seeded ) as $name ) {
+		$after[ $name ] = fileperms( $base . '/' . $name ) & 0777;
+	}
+
+	$out['normalise'] = [
+		'record'  => $record,
+		'option'  => get_option( 'mdf_mode_normalisation' ),
+		'seeded'  => $seeded,
+		'after'   => $after,
+	];
+}
+
 echo json_encode( $out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ), "\n";
